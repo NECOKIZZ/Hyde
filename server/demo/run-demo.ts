@@ -20,7 +20,7 @@ const MESSENGER = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const usd = (v: bigint | number | string) => Number(typeof v === "bigint" ? formatUnits(v, 6) : v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const wallet = privateKeyToAccount(keccak256(toHex("hyde-demo-wallet")));
+const wallet = privateKeyToAccount(keccak256(toHex(`hyde-demo-wallet-${process.env.RUN_ID ?? "1"}`)));
 const relayerKey = keccak256(toHex("hyde-demo-relayer"));
 const { pub, as, impersonate } = forkClients(FORK);
 
@@ -36,6 +36,7 @@ function emit(e: Record<string, unknown> & { kind: string }) {
 }
 const step = (text: string) => emit({ kind: "step", text });
 let proofs = 0;
+let forkBlock = 0n;
 
 async function api(path: string, body?: object) {
   const res = await fetch(API + path, {
@@ -52,16 +53,18 @@ async function publicUsdc() {
   return pub.readContract({ address: USDC, abi: erc20Abi, functionName: "balanceOf", args: [wallet.address] });
 }
 async function queued() {
-  const q = (await pub.readContract({ address: getQueueAddress("usdc"), abi: JSON.parse(readFileSync(new URL("./veil-abi.json", import.meta.url), "utf8")).queue, functionName: "getPendingDepositsWithData" })) as { shieldAmount: bigint }[];
-  return q.reduce((s, d) => s + d.shieldAmount, 0n);
+  const q = (await pub.readContract({ address: getQueueAddress("usdc"), abi: JSON.parse(readFileSync(new URL("./veil-abi.json", import.meta.url), "utf8")).queue, functionName: "getPendingDepositsWithData" })) as { shieldAmount: bigint; fallbackReceiver: Address }[];
+  return q.filter((d) => d.fallbackReceiver.toLowerCase() === wallet.address.toLowerCase()).reduce((s, d) => s + d.shieldAmount, 0n);
 }
 async function stats(extra: Record<string, string> = {}) {
   emit({ kind: "stats", pub: usd(await publicUsdc()), queue: usd(await queued()), proofs: String(proofs), ...extra });
 }
 
 async function setup() {
-  const block = await pub.getBlockNumber();
-  emit({ kind: "block", n: String(block) });
+  // Full-pool reads exceed a fork's default call gas limit.
+  await pub.request({ method: "evm_setBlockGasLimit" as never, params: ["0x3B9ACA00"] as never });
+  forkBlock = await pub.getBlockNumber();
+  emit({ kind: "block", n: String(forkBlock) });
   // Test funds: 500 USDC and a little ETH for the demo wallet; ETH for Hyde's relayer.
   const slot = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [wallet.address, 9n]));
   await pub.request({ method: "hardhat_setStorageAt" as never, params: [USDC, slot, toHex(500_000_000n, { size: 32 })] as never });
@@ -85,6 +88,7 @@ async function sendFromWallet(call: { to: Address; data: Hex }) {
 
 async function run() {
   const sig = await wallet.signMessage({ message: VEIL_SIGNED_MESSAGE });
+  emit({ kind: "block", n: String(forkBlock) });
   await stats({ priv: "0.00" });
 
   emit({ kind: "card", show: true, title: "A real Hyde run on a Base mainnet fork", sub: "Real Veil Cash, USDC, Circle CCTP and Hyde contracts. Real zero-knowledge proofs. Test funds." });
@@ -114,7 +118,7 @@ async function run() {
   await sleep(1500);
   step("2 · Compliance screening");
   emit({ kind: "note", text: "Veil's screener approves the deposit (on this fork, a stand-in plays Veil's operator)" });
-  const accepted = await acceptPending(FORK, (m) => console.log(m));
+  const accepted = await acceptPending(FORK, wallet.address, (m) => console.log(m));
   for (const hash of accepted) {
     const r = await pub.getTransactionReceipt({ hash });
     proofs++;
@@ -187,7 +191,7 @@ async function run() {
   await sleep(2000);
   step("5 · Follow the money");
   if (lastBox.box) {
-    const logs = await pub.getContractEvents({ address: USDC, abi: erc20Abi, eventName: "Transfer", args: { to: lastBox.box }, fromBlock: 0n });
+    const logs = await pub.getContractEvents({ address: USDC, abi: erc20Abi, eventName: "Transfer", args: { to: lastBox.box }, fromBlock: forkBlock });
     const from = logs.map((l) => l.args.from!.toLowerCase());
     const fromPool = from.includes(POOL.toLowerCase());
     const touched = [...seen].length > 0 && from.includes(wallet.address.toLowerCase());

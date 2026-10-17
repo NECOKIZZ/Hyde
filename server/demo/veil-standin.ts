@@ -61,7 +61,7 @@ const toExt = (e: { recipient: string; extAmount: string; relayer: string; fee: 
 });
 
 /** Accepts every pending USDC deposit the way Veil's operator does. Returns the accept tx hashes. */
-export async function acceptPending(rpc: string, log: (m: string) => void = console.log): Promise<Hex[]> {
+export async function acceptPending(rpc: string, owner: Address, log: (m: string) => void = console.log): Promise<Hex[]> {
   const { pub, as, impersonate } = forkClients(rpc);
   const queue = getQueueAddress("usdc");
   const entry = getAddresses().entry;
@@ -71,10 +71,11 @@ export async function acceptPending(rpc: string, log: (m: string) => void = cons
   const operator = (await pub.readContract({ address: entry, abi: ENTRY_ACCEPT, functionName: "operator" })) as Address;
   await impersonate(operator);
   const hashes: Hex[] = [];
-  for (const d of pending) {
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  for (const d of pending.filter((p) => p.fallbackReceiver.toLowerCase() === owner.toLowerCase())) {
     log(`screener: building deposit proof for nonce ${d.nonce} (${Number(d.shieldAmount) / 1e6} USDC)`);
-    const owner = Keypair.fromString(d.depositKey);
-    const tx = await prepareTransaction({ commitments: await allCommitments(pub), outputs: [new Utxo({ amount: d.shieldAmount, keypair: owner })] });
+    const noteOwner = Keypair.fromString(d.depositKey);
+    const tx = await prepareTransaction({ commitments: await allCommitments(pub), outputs: [new Utxo({ amount: d.shieldAmount, keypair: noteOwner })], recipient: ZERO, relayer: ZERO });
     const hash = await as(operator).writeContract({
       address: entry, abi: ENTRY_ACCEPT, functionName: "acceptUSDC", args: [d.nonce, toArgs(tx.args), toExt(tx.extData)], chain: base,
     });
