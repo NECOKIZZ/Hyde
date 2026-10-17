@@ -7,7 +7,7 @@ import type { Address, Hex } from "viem";
 import { burnStatus } from "./cctp.js";
 import type { ChainKey } from "./chains.js";
 import { openExitBox, usdcBalanceOnBase, type ExitParams } from "./exitbox.js";
-import { inboxQueue, sweepInbox, type InboxSlot, type PrivateBalances } from "./veil.js";
+import type { PrivateBalances } from "./veil.js";
 
 interface JobBase {
   id: string;
@@ -15,17 +15,6 @@ interface JobBase {
   updatedAt: string;
   error?: string;
   log: string[];
-}
-
-/** Public USDC → user's Veil inbox on Base (Circle forwards cross-chain deposits) → shielded pool. */
-export interface ShieldJob extends JobBase {
-  kind: "shield";
-  status: "awaiting_funds" | "sweeping" | "screening" | "done" | "expired" | "failed";
-  src: ChainKey | "solana";
-  /** USDC base units the user is sending */
-  amount: string;
-  slot: InboxSlot;
-  sweepTx?: string;
 }
 
 /** Shielded pool → one-time exit box on Base → CCTP (Circle-forwarded) → recipient on any chain. */
@@ -54,15 +43,15 @@ export interface PayrollJob extends JobBase {
   items: { label?: string; to: string; to_chain: string; receives: string; job_id?: string }[];
 }
 
-export type Job = ShieldJob | ExitJob | PayrollJob;
+export type Job = ExitJob | PayrollJob;
 
 const FILE = process.env.JOBS_FILE ?? "data/jobs.json";
-const SHIELD_TTL_MS = 6 * 3600_000;
 const jobs = new Map<string, Job>();
 
 export function loadJobs() {
   try {
-    for (const j of JSON.parse(readFileSync(FILE, "utf8")) as Job[]) {
+    for (const j of JSON.parse(readFileSync(FILE, "utf8")) as (Job | { kind: "shield" })[]) {
+      if (j.kind === "shield") continue; // inbox deposits are gone: deposits now go straight from the wallet
       // A proof in flight dies with the process; the funds never left the private balance.
       if (j.kind === "exit" && j.status === "proving") {
         j.status = "failed";
@@ -102,11 +91,6 @@ export function getJob(id: string): Job | undefined {
   return jobs.get(id);
 }
 
-export function pendingShields(inbox: Address): ShieldJob[] {
-  return [...jobs.values()].filter(
-    (j): j is ShieldJob => j.kind === "shield" && j.slot.forwarderAddress === inbox && !["done", "expired", "failed"].includes(j.status),
-  );
-}
 
 /** Stable, non-reversible id for a Veil key: used for locks and caches, never stored with jobs. */
 export function keyId(kp: Keypair): string {
@@ -178,12 +162,11 @@ export function startSend(job: ExitJob, kp: Keypair) {
  * Pays every payee in turn from the private balance. Checks the balance covers the whole run first,
  * so a short balance pays nobody rather than half the team.
  */
-export function startPayroll(run: PayrollJob, kp: Keypair, slot: InboxSlot, sends: Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">[]) {
+export function startPayroll(run: PayrollJob, kp: Keypair, sends: Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">[]) {
   void withUserLock(keyId(kp), async () => {
-    const bal = await runVeil<PrivateBalances>({ op: "balance", key: kp.privkey, slot });
-    const spendable = BigInt(Math.round(Number(bal.shielded) * 1e6)) + BigInt(Math.round(Number(bal.inbox) * 1e6));
-    if (spendable < BigInt(run.total)) {
-      throw new Error(`Private balance ${bal.shielded} USDC (+${bal.inbox} clearing) is below the payroll total of ${Number(run.total) / 1e6} USDC. Nobody was paid.`);
+    const bal = await runVeil<PrivateBalances>({ op: "balance", key: kp.privkey });
+    if (BigInt(Math.round(Number(bal.shielded) * 1e6)) < BigInt(run.total)) {
+      throw new Error(`Private balance ${bal.shielded} USDC is below the payroll total of ${Number(run.total) / 1e6} USDC. Nobody was paid.`);
     }
     update(run, { status: "sending" }, `balance ${bal.shielded} USDC covers the run`);
     let failures = 0;
@@ -206,22 +189,24 @@ export function startPayroll(run: PayrollJob, kp: Keypair, slot: InboxSlot, send
 // background and callers poll. Results are cached briefly per key.
 interface BalanceEntry {
   at: number;
-  result?: PrivateBalances & { merged?: string | null };
+  result?: PrivateBalances;
   error?: string;
   running: boolean;
 }
 const balanceCache = new Map<string, BalanceEntry>();
 const BALANCE_TTL_MS = 30_000;
 
-export function requestBalance(kp: Keypair, slot: InboxSlot): BalanceEntry {
+export function requestBalance(kp: Keypair, owner?: Address): BalanceEntry {
   const id = keyId(kp);
   const cached = balanceCache.get(id);
   if (cached && (cached.running || Date.now() - cached.at < BALANCE_TTL_MS)) return cached;
   const entry: BalanceEntry = { at: Date.now(), running: true };
   balanceCache.set(id, entry);
-  void withUserLock(id, async () => {
-    entry.result = await runVeil<PrivateBalances & { merged?: string | null }>({ op: "balance", key: kp.privkey, slot });
-  })
+  // Read-only, so it doesn't queue behind a send's proof.
+  runVeil<PrivateBalances>({ op: "balance", key: kp.privkey, owner })
+    .then((r) => {
+      entry.result = r;
+    })
     .catch((err: Error) => {
       entry.error = err.message;
     })
@@ -230,30 +215,6 @@ export function requestBalance(kp: Keypair, slot: InboxSlot): BalanceEntry {
       entry.at = Date.now();
     });
   return entry;
-}
-
-async function advanceShield(job: ShieldJob) {
-  switch (job.status) {
-    case "awaiting_funds": {
-      if ((await usdcBalanceOnBase(job.slot.forwarderAddress)) > 0n) {
-        update(job, { status: "sweeping" }, "funds arrived in the Veil inbox");
-      } else if (Date.now() - Date.parse(job.createdAt) > SHIELD_TTL_MS) {
-        update(job, { status: "expired" }, "no funds arrived");
-      }
-      return;
-    }
-    case "sweeping": {
-      const r = await sweepInbox(job.slot);
-      update(job, { status: "screening", sweepTx: r.sweepTx }, `swept into Veil's deposit queue ${r.sweepTx}`);
-      return;
-    }
-    case "screening": {
-      const q = await inboxQueue(job.slot);
-      if (q.pendingCount > 0) return;
-      update(job, { status: "done" }, "cleared screening; joins the spendable balance on the next balance or send");
-      return;
-    }
-  }
 }
 
 async function advanceExit(job: ExitJob) {
@@ -284,13 +245,9 @@ const errorCounts = new Map<string, number>();
 export async function tick() {
   for (const job of jobs.values()) {
     if (job.kind === "payroll") continue; // driven by startPayroll; its sends are ExitJobs below
-    const active = job.kind === "shield"
-      ? ["awaiting_funds", "sweeping", "screening"].includes(job.status)
-      : ["awaiting_funds", "opening", "bridging"].includes(job.status);
-    if (!active) continue;
+    if (!["awaiting_funds", "opening", "bridging"].includes(job.status)) continue;
     try {
-      if (job.kind === "shield") await advanceShield(job);
-      else await advanceExit(job);
+      await advanceExit(job);
       errorCounts.delete(job.id);
     } catch (err) {
       const n = (errorCounts.get(job.id) ?? 0) + 1;

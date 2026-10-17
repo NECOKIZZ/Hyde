@@ -181,10 +181,12 @@ export function createServer() {
     {
       title: "Go private",
       description:
-        "Proposes moving public USDC into the user's private balance. From Base: one USDC transfer. From another chain: " +
-        "call with step=approve, wait for that transaction to confirm, then call with step=bridge (Circle CCTP delivers to Base automatically). " +
-        "Minimum 20.1 USDC arriving on Base. This is how the private balance gets funded; hyde_send and hyde_payroll spend only from it. " +
-        "After the transfer confirms, poll hyde_balance until spendable_usdc covers the payment (first deposit: ~15 min screening).",
+        "Deposits public USDC from the user's PayBox wallet straight into the Veil private pool on Base. This is how the private " +
+        "balance gets funded; hyde_send and hyde_payroll spend only from it. From Base: call with the same arguments repeatedly, " +
+        "waiting for each proposed transaction to confirm before the next call; each call proposes the next step (register once, " +
+        "approve, deposit) until step is \"deposit\". From another chain: step=approve, then step=bridge (Circle delivers to the user's " +
+        "own Base wallet), then the Base steps for the amount that arrived. Minimum 20.1 USDC on Base. After the deposit confirms, " +
+        "poll hyde_balance until spendable_usdc covers the payment (first deposit: ~15 min screening).",
       inputSchema: z
         .object({
           veil_signature: veilSignature,
@@ -201,9 +203,9 @@ export function createServer() {
       const result = proposeEvm({ chain: `eip155:${data.call.chain_id}`, to: data.call.to, value: data.call.value, data: data.call.data });
       const lines = [
         `${data.call.description}.`,
-        data.inbox ? `Private inbox on Base: ${data.inbox}.` : "",
-        data.arrives_at_least ? `At least ${data.arrives_at_least} USDC reaches the inbox; Veil keeps 0.3%.` : "",
-        data.next_step ? `After this confirms, call hyde_deposit again with step="${data.next_step}".` : "After this confirms, the balance clears screening (typically ~15 min). Check with hyde_balance.",
+        `Step: ${data.step}.`,
+        data.step === "deposit" && data.arrives_at_least ? `About ${data.arrives_at_least} USDC enters the private pool; Veil keeps 0.3%.` : "",
+        data.next_step ? `Next: ${data.next_step}.` : "After this confirms, the deposit clears Veil's screening (typically ~15 min). Check with hyde_balance.",
         "Nothing has been signed: PayBox will show the transaction for approval.",
       ];
       return { ...result, content: text(lines.filter(Boolean).join("\n")) };
@@ -216,7 +218,8 @@ export function createServer() {
       title: "Go private from Solana",
       description:
         "Moves public USDC from the user's Solana wallet into their private balance. Returns the exact PayBox request_swap " +
-        "(bridge) arguments to run next: Solana USDC → Base USDC, delivered to the user's private inbox. Minimum 21 USDC.",
+        "(bridge) arguments to run next: Solana USDC → Base USDC, delivered to the user's own Base wallet; then run hyde_deposit " +
+        "with from_chain=base for the amount that arrived. Minimum 21 USDC.",
       inputSchema: z.object({ veil_signature: veilSignature, amount: usdc.describe("USDC to send from Solana") }).strict(),
       outputSchema: z
         .object({
@@ -234,7 +237,7 @@ export function createServer() {
       return {
         content: text(
           `Next: call PayBox request_swap with the user's Solana wallet to bridge ${args.amount} USDC to Base, ` +
-            `recipient ${data.inbox} (the user's private inbox). After it lands, the balance clears screening (typically ~15 min).`,
+            `recipient ${data.inbox} (the user's own Base wallet). After it lands, call hyde_deposit with from_chain=base for the amount that arrived.`,
         ),
         structuredContent: data,
       };
@@ -248,7 +251,7 @@ export function createServer() {
       description:
         "Shows the user's private USDC balance (spendable_usdc) and deposits still clearing (clearing/screening). Check it before hyde_send or " +
         "hyde_payroll. If status is computing, wait ~10 seconds and call again with the same signature; do not call other tools meanwhile. " +
-        "Also restarts any deposit that reached the inbox but was not yet moved into the pool.",
+        "screening_usdc is a deposit still in Veil's compliance check.",
       inputSchema: z.object({ veil_signature: veilSignature }).strict(),
       outputSchema: balanceOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },

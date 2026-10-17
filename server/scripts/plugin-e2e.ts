@@ -7,7 +7,7 @@ import http from "node:http";
 import { createInterface } from "node:readline";
 import { decodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { VEIL_SIGNED_MESSAGE } from "@veil-cash/sdk";
+import { ENTRY_ABI, VEIL_SIGNED_MESSAGE, getAddresses } from "@veil-cash/sdk";
 
 const NODE24 = process.env.NODE24 ?? "/opt/node24/bin/node";
 const PLUGIN = new URL("../../plugin/dist/plugin.mjs", import.meta.url).pathname;
@@ -113,15 +113,15 @@ try {
   assert.equal((await callTool("hyde_instant_send", { sender: SENDER, to: SENDER, amount: "1" })).isError, true);
   assert.equal((await callTool("hyde_instant_send", { sender: "not-a-key", to: RECIPIENT, amount: "1" })).isError, true);
 
+  // A fresh wallet must register its Veil key first: the proposal is Veil's Entry.register, from the wallet itself.
   const fromBase = await callTool("hyde_deposit", { veil_signature, from_chain: "base", amount: "25" });
   const p1 = proposal(fromBase);
   assert.equal(p1.kind, "evm");
   assert.equal(p1.chain, "eip155:8453");
-  assert.equal(p1.transaction.to.toLowerCase(), "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-  const t = decodeFunctionData({ abi: erc20Abi, data: p1.transaction.data });
-  assert.equal(t.functionName, "transfer");
-  assert.equal(t.args[1], 25_000_000n);
-  const inbox = t.args[0];
+  assert.equal(p1.transaction.to.toLowerCase(), getAddresses().entry.toLowerCase());
+  const reg = decodeFunctionData({ abi: ENTRY_ABI, data: p1.transaction.data });
+  assert.equal(reg.functionName, "register");
+  assert.equal((reg.args![0] as { owner: string }).owner.toLowerCase(), wallet.address.toLowerCase());
 
   const approve = proposal(await callTool("hyde_deposit", { veil_signature, from_chain: "arbitrum", amount: "25", step: "approve" }));
   assert.equal(approve.chain, "eip155:42161");
@@ -134,7 +134,7 @@ try {
   });
   assert.equal(bridge.transaction.to, "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
   assert.equal(burn.args[1], 6, "destination is Base");
-  assert.equal(`0x${burn.args[2].slice(26)}`.toLowerCase(), inbox.toLowerCase(), "mints to the same Veil inbox");
+  assert.equal(`0x${burn.args[2].slice(26)}`.toLowerCase(), wallet.address.toLowerCase(), "mints to the user's own Base wallet");
   assert.ok(burn.args[5] > 0n && burn.args[5] < 1_000_000n, "fee cap is sane");
 
   const tooSmall = await callTool("hyde_deposit", { veil_signature, from_chain: "base", amount: "5" });
@@ -151,12 +151,11 @@ try {
   }
   assert.equal(balance.structuredContent.status, "ready");
   assert.equal(balance.structuredContent.spendable_usdc, "0");
-  assert.ok(balance.structuredContent.pending_deposits.length >= 2, "deposits are tracked against the inbox");
 
-  // Solana in: instructions for PayBox's own bridge, delivering to the same Veil inbox.
+  // Solana in: instructions for PayBox's own bridge to the user's Base wallet, then the Base deposit steps.
   const solIn = await callTool("hyde_deposit_solana", { veil_signature, amount: "25" });
   assert.equal(solIn.structuredContent.paybox_tool, "request_swap");
-  assert.equal(solIn.structuredContent.arguments.recipient.toLowerCase(), inbox.toLowerCase());
+  assert.equal(solIn.structuredContent.arguments.recipient.toLowerCase(), wallet.address.toLowerCase(), "Solana deposits bridge to the user's own Base wallet");
   assert.equal(solIn.structuredContent.arguments.src_chain, "solana");
   assert.equal((await callTool("hyde_deposit_solana", { veil_signature, amount: "5" })).isError, true);
 

@@ -1,22 +1,25 @@
 import {
+  ENTRY_ABI,
   Keypair,
-  deriveSubaccountChildPrivateKey,
+  VEIL_SIGNED_MESSAGE,
+  buildApproveUSDCTx,
+  buildDepositUSDCTx,
+  buildRegisterTx,
   deriveSubaccountSlot,
+  getAddresses,
   getQueueBalance,
-  getRelayUrl,
-  isSubaccountForwarderDeployed,
-  mergeSubaccount,
   withdraw,
   type SubaccountSlot,
 } from "@veil-cash/sdk";
-import type { Address, Hex } from "viem";
+import { erc20Abi, recoverMessageAddress, type Address, type Hex } from "viem";
 import { formatUsdc } from "./cctp.js";
 import { rpcUrl } from "./chains.js";
+import { publicClient } from "./clients.js";
 import { scanBalances } from "./scan.js";
 
 /** We use one sub-account slot as every user's "go private" inbox. */
 export const INBOX_SLOT = 0;
-/** Veil's minimum sweep into the pool is 20 USDC net of its 0.3% fee. */
+/** Veil's minimum deposit is 20 USDC net of its 0.3% fee. */
 export const MIN_SHIELD_USDC = 20_100_000n;
 
 const BASE_RPC = () => rpcUrl("base");
@@ -49,62 +52,44 @@ export async function inboxSlot(kp: Keypair): Promise<InboxSlot> {
   return { slot: s.slot, salt: s.salt, childDepositKey: s.childDepositKey, childOwner: s.childOwner, forwarderAddress: s.forwarderAddress };
 }
 
-async function relayPost<T>(endpoint: string, body: unknown): Promise<T> {
-  const res = await fetch(`${process.env.VEIL_RELAY_URL ?? getRelayUrl()}${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
-  if (!res.ok) throw new Error(`Veil relay ${endpoint}: ${data.error ?? data.message ?? res.status}`);
-  return data;
+/** The PayBox wallet that signed the Veil message: it owns the deposit registration. */
+export async function ownerFromSignature(signature: Hex): Promise<Address> {
+  return recoverMessageAddress({ message: VEIL_SIGNED_MESSAGE, signature });
 }
 
-/** Deploy (if needed) and sweep the inbox forwarder into Veil's deposit queue. Needs no secrets. */
-export async function sweepInbox(slot: InboxSlot): Promise<{ deployTx?: string; sweepTx: string }> {
-  let deployTx: string | undefined;
-  if (!(await isSubaccountForwarderDeployed({ forwarderAddress: slot.forwarderAddress, rpcUrl: BASE_RPC() }))) {
-    const r = await relayPost<{ transactionHash: string }>("/stealth/deploy", {
-      salt: slot.salt,
-      childDepositKey: slot.childDepositKey,
-      childOwner: slot.childOwner,
-      expectedForwarder: slot.forwarderAddress,
-    });
-    deployTx = r.transactionHash;
+export type DepositStep = "register" | "approve" | "deposit";
+
+/**
+ * The next wallet transaction for a direct deposit from `owner` on Base, read from chain state:
+ * register the Veil deposit key once, approve Veil's entry contract, then queue the deposit.
+ */
+export async function nextDepositStep(owner: Address, kp: Keypair, amount: bigint): Promise<{ step: DepositStep; to: Address; data: Hex }> {
+  const client = publicClient("base");
+  const { entry, usdcToken } = getAddresses();
+  const depositKey = kp.depositKey();
+  const registered = (await client.readContract({ address: entry, abi: ENTRY_ABI, functionName: "depositKeys", args: [owner] })) as Hex;
+  if (registered === "0x") return { step: "register", ...buildRegisterTx(depositKey, owner) };
+  if (registered.toLowerCase() !== depositKey.toLowerCase()) {
+    throw new Error("This wallet is registered with Veil under a different key. Sign the Veil message with the same wallet you used on veil.cash.");
   }
-  const r = await relayPost<{ transactionHash: string }>("/stealth/sweep", { forwarder: slot.forwarderAddress, asset: "usdc" });
-  return { deployTx, sweepTx: r.transactionHash };
-}
-
-export async function inboxQueue(slot: InboxSlot) {
-  return getQueueBalance({ address: slot.forwarderAddress, pool: "usdc", rpcUrl: BASE_RPC() });
+  const allowance = await client.readContract({ address: usdcToken, abi: erc20Abi, functionName: "allowance", args: [owner, entry] });
+  if (allowance < amount) return { step: "approve", ...buildApproveUSDCTx({ amount: formatUsdc(amount) }) };
+  return { step: "deposit", ...buildDepositUSDCTx({ depositKey, amount: formatUsdc(amount) }) };
 }
 
 export interface PrivateBalances {
   /** Spendable now */
   shielded: string;
-  /** In the inbox, accepted into the pool, waiting to be merged into the main balance */
-  inbox: string;
-  /** Swept, waiting on Veil's compliance screening / queue processing */
+  /** Deposited, waiting on Veil's compliance screening */
   screening: string;
 }
 
-export async function balances(kp: Keypair, slot: InboxSlot): Promise<PrivateBalances> {
-  const child = new Keypair(deriveSubaccountChildPrivateKey(rootKey(kp), INBOX_SLOT));
-  const [[main, inbox], queue] = await Promise.all([
-    scanBalances([kp, child], BASE_RPC()),
-    inboxQueue(slot).catch(() => ({ queueBalance: "0" })),
+export async function balances(kp: Keypair, owner?: Address): Promise<PrivateBalances> {
+  const [[main], queue] = await Promise.all([
+    scanBalances([kp], BASE_RPC()),
+    owner ? getQueueBalance({ address: owner, pool: "usdc", rpcUrl: BASE_RPC() }) : { queueBalance: "0" },
   ]);
-  return { shielded: formatUsdc(main.unspent), inbox: formatUsdc(inbox.unspent), screening: queue.queueBalance };
-}
-
-/** Moves anything that cleared screening from the inbox into the main shielded balance. */
-export async function mergeInbox(kp: Keypair): Promise<string | null> {
-  const child = new Keypair(deriveSubaccountChildPrivateKey(rootKey(kp), INBOX_SLOT));
-  const [inbox] = await scanBalances([child], BASE_RPC());
-  if (inbox.unspent === 0n) return null;
-  const r = await mergeSubaccount({ rootPrivateKey: rootKey(kp), slot: INBOX_SLOT, pool: "usdc", rpcUrl: BASE_RPC() });
-  return r.transactionHash;
+  return { shielded: formatUsdc(main.unspent), screening: queue.queueBalance };
 }
 
 /** Private withdrawal (ZK proof + Veil relayer). The withdrawing wallet never appears on-chain. */

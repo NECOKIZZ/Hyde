@@ -8,8 +8,8 @@ import { CHAIN_KEYS, chainInfo, type ChainKey } from "./chains.js";
 import { relayerAccount } from "./clients.js";
 import { evmRecipient, exitParams, predictExitBox, usdcBalanceOnBase } from "./exitbox.js";
 import { SOLANA, isSolanaAddress, toBytes32, usdcAccountExists, usdcTokenAccount } from "./solana.js";
-import { createJob, getJob, pendingShields, requestBalance, startPayroll, startSend, type ExitJob, type Job, type PayrollJob, type ShieldJob } from "./jobs.js";
-import { MIN_SHIELD_USDC, inboxSlot, keypairFrom } from "./veil.js";
+import { createJob, getJob, requestBalance, startPayroll, startSend, type ExitJob, type Job, type PayrollJob } from "./jobs.js";
+import { MIN_SHIELD_USDC, keypairFrom, nextDepositStep, ownerFromSignature } from "./veil.js";
 
 const chain = z.enum(CHAIN_KEYS);
 const anyChain = z.enum([...CHAIN_KEYS, "solana"]);
@@ -115,9 +115,6 @@ function callView(c: UnsignedCall) {
 
 function jobView(job: Job) {
   const base = { job_id: job.id, kind: job.kind, status: job.status, updated_at: job.updatedAt, error: job.error, log: job.log.slice(-5) };
-  if (job.kind === "shield") {
-    return { ...base, from_chain: job.src, amount_usdc: formatUsdc(BigInt(job.amount)), inbox: job.slot.forwarderAddress, sweep_tx: job.sweepTx };
-  }
   if (job.kind === "payroll") {
     return {
       ...base,
@@ -178,67 +175,67 @@ export function buildApi() {
     },
   })));
 
-  // Go private: one unsigned call per step. Cross-chain needs "approve" then "bridge".
+  // Go private: deposit straight from the user's PayBox wallet into Veil's pool on Base. Each call
+  // proposes the next wallet transaction (register once, approve, deposit), read from chain state.
+  // Other chains first bridge to the user's own Base wallet with CCTP.
   api.post("/deposit", route(async (req) => {
-    const body = auth.and(z.object({ from_chain: chain, amount: usdc, step: z.enum(["approve", "bridge"]).optional() })).parse(req.body);
-    // Veil's relay no longer deploys/sweeps inbox forwarders, so funds sent to an inbox can't move on.
-    throw new ApiError(503, "Vault deposits are paused: Veil's relay stopped processing deposit inboxes. Nothing was proposed and no funds moved. Use hyde_instant_send on Solana meanwhile.");
-    const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
+    const body = z
+      .object({ veil_signature: z.string().refine(isHex, "must be 0x-prefixed hex"), from_chain: chain, amount: usdc, step: z.enum(["approve", "bridge"]).optional() })
+      .parse(req.body);
+    const kp = keypairFrom({ veil_signature: body.veil_signature as Hex });
+    const owner = await ownerFromSignature(body.veil_signature as Hex);
     const amount = parseUsdc(body.amount);
-    const slot = await inboxSlot(kp);
 
     if (body.from_chain === "base") {
-      if (amount < MIN_SHIELD_USDC) throw new ApiError(422, `Minimum is ${formatUsdc(MIN_SHIELD_USDC)} USDC.`);
-      const job = createJob<ShieldJob>({ kind: "shield", status: "awaiting_funds", src: "base", amount: amount.toString(), slot });
+      if (amount < MIN_SHIELD_USDC) throw new ApiError(422, `Minimum deposit is ${formatUsdc(MIN_SHIELD_USDC)} USDC (Veil's minimum is 20 USDC after its 0.3% fee).`);
+      const tx = await nextDepositStep(owner, kp, amount);
+      const what = {
+        register: "Register your private key with Veil (one time only)",
+        approve: `Allow Veil to take ${body.amount} USDC`,
+        deposit: `Deposit ${body.amount} USDC into the private pool`,
+      }[tx.step];
       return {
         body: {
-          step: "transfer",
-          next_step: null,
-          job_id: job.id,
-          inbox: slot.forwarderAddress,
-          arrives_at_least: formatUsdc(amount),
-          call: callView(transferCall("base", slot.forwarderAddress, amount, `Send ${body.amount} USDC to your private inbox on Base`)),
+          step: tx.step,
+          next_step: tx.step === "deposit" ? null : "call hyde_deposit again with the same arguments after this confirms",
+          wallet: owner,
+          arrives_at_least: tx.step === "deposit" ? formatUsdc((amount * 997n) / 1000n) : undefined,
+          call: { chain_id: chainInfo("base").chain.id, to: tx.to, value: "0", data: tx.data, description: what },
         },
       };
     }
 
     const step = body.step ?? "approve";
     if (step === "approve") {
-      return { body: { step, next_step: "bridge", call: callView(approveCall(body.from_chain, amount)) } };
+      return { body: { step, next_step: "bridge", wallet: owner, call: callView(approveCall(body.from_chain, amount)) } };
     }
     const fees = await quoteFees(chainInfo(body.from_chain).domain, BASE_DOMAIN);
     const maxFee = maxFeeFor(amount, fees);
     if (amount - maxFee < MIN_SHIELD_USDC) {
       throw new ApiError(422, `At least ${formatUsdc(MIN_SHIELD_USDC)} USDC must reach Base after up to ${formatUsdc(maxFee)} USDC of bridge fees.`);
     }
-    const job = createJob<ShieldJob>({ kind: "shield", status: "awaiting_funds", src: body.from_chain, amount: amount.toString(), slot });
     return {
       body: {
         step,
-        next_step: null,
-        job_id: job.id,
-        inbox: slot.forwarderAddress,
+        next_step: `after the USDC arrives in your Base wallet (about a minute), call hyde_deposit with from_chain=base and amount=${formatUsdc(amount - maxFee)}`,
+        wallet: owner,
         bridge_fee_at_most: formatUsdc(maxFee),
         arrives_at_least: formatUsdc(amount - maxFee),
-        call: callView(burnCall({ src: body.from_chain, dst: "base", amount, recipient: slot.forwarderAddress, maxFee })),
+        call: callView(burnCall({ src: body.from_chain, dst: "base", amount, recipient: owner, maxFee })),
       },
     };
   }));
 
-  // Go private from Solana. A CCTP burn on Solana needs a second (event account) signer, which PayBox
-  // proposals don't allow, so the agent uses PayBox's own bridge to deliver into the Veil inbox.
+  // From Solana: PayBox's own bridge to the user's Base wallet, then the Base deposit steps.
   api.post("/deposit/solana", route(async (req) => {
-    const body = auth.and(z.object({ amount: usdc })).parse(req.body);
-    throw new ApiError(503, "Vault deposits are paused: Veil's relay stopped processing deposit inboxes. Nothing was proposed and no funds moved. Use hyde_instant_send on Solana meanwhile.");
-    const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
+    const body = z.object({ veil_signature: z.string().refine(isHex, "must be 0x-prefixed hex"), amount: usdc }).parse(req.body);
     const amount = parseUsdc(body.amount);
     if (amount < MIN_SOLANA_DEPOSIT) throw new ApiError(422, `Minimum from Solana is ${formatUsdc(MIN_SOLANA_DEPOSIT)} USDC (bridge fees come off first).`);
-    const slot = await inboxSlot(kp);
-    const job = createJob<ShieldJob>({ kind: "shield", status: "awaiting_funds", src: "solana", amount: amount.toString(), slot });
+    const owner = await ownerFromSignature(body.veil_signature as Hex);
     return {
       body: {
-        job_id: job.id,
-        inbox: slot.forwarderAddress,
+        job_id: "none",
+        inbox: owner,
         paybox_tool: "request_swap",
         arguments: {
           src_chain: "solana",
@@ -246,9 +243,9 @@ export function buildApi() {
           src_token: SOLANA.usdcMint,
           dst_token: chainInfo("base").usdc,
           amount: body.amount,
-          recipient: slot.forwarderAddress,
+          recipient: owner,
         },
-        note: "Bridge with PayBox request_swap using these values (field formats per your PayBox tool schema). The recipient must be the inbox address exactly. At least 20.1 USDC must arrive on Base.",
+        note: "Bridge with PayBox request_swap to the user's own Base wallet, then call hyde_deposit with from_chain=base for the amount that arrived (at least 20.1 USDC).",
       },
     };
   }));
@@ -256,24 +253,18 @@ export function buildApi() {
   api.post("/balance", route(async (req) => {
     const body = auth.parse(req.body);
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
-    const slot = await inboxSlot(kp);
-    // A deposit whose job was lost (e.g. a restart wiped the job file) still sits in the inbox:
-    // track it again so the worker sweeps it.
-    if (pendingShields(slot.forwarderAddress).length === 0) {
-      const held = await usdcBalanceOnBase(slot.forwarderAddress).catch(() => 0n);
-      if (held >= MIN_SHIELD_USDC) createJob<ShieldJob>({ kind: "shield", status: "sweeping", src: "base", amount: held.toString(), slot });
-    }
-    const entry = requestBalance(kp, slot);
-    const deposits = pendingShields(slot.forwarderAddress).map(jobView);
+    const owner = body.veil_signature ? await ownerFromSignature(body.veil_signature as Hex) : undefined;
+    const entry = requestBalance(kp, owner);
     if (entry.error) throw new ApiError(502, `Balance scan failed: ${entry.error}`);
-    if (!entry.result) return { status: 202, body: { status: "computing", pending_deposits: deposits } };
+    if (!entry.result) return { status: 202, body: { status: "computing", pending_deposits: [] } };
+    const screening = entry.result.screening;
     return {
       body: {
         status: entry.running ? "refreshing" : "ready",
         spendable_usdc: entry.result.shielded,
-        clearing_usdc: entry.result.inbox,
-        screening_usdc: entry.result.screening,
-        pending_deposits: deposits,
+        clearing_usdc: "0",
+        screening_usdc: screening,
+        pending_deposits: Number(screening) > 0 ? [{ status: "screening", amount_usdc: screening, note: "Veil compliance screening, ~15 min for a first deposit" }] : [],
       },
     };
   }));
@@ -315,14 +306,13 @@ export function buildApi() {
     if (!body.confirm) return { body: { status: "quote", ...summary, next: "Show this to the user; call again with confirm=true to pay everyone." } };
 
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
-    const slot = await inboxSlot(kp);
     const run = createJob<PayrollJob>({
       kind: "payroll",
       status: "checking",
       total: total.toString(),
       items: prepared.map((p) => ({ label: p.payee.label, to: p.payee.to, to_chain: p.payee.to_chain, receives: p.payee.amount })),
     });
-    startPayroll(run, kp, slot, prepared.map((p) => p.job));
+    startPayroll(run, kp, prepared.map((p) => p.job));
     return { status: 202, body: { status: "sending", job_id: run.id, ...summary, next: "Poll the job with hyde_status; each payee is paid in turn (about a minute each)." } };
   }));
 
