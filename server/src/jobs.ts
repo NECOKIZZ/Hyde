@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import type { Keypair } from "@veil-cash/sdk";
 import type { Address, Hex } from "viem";
 import { burnStatus } from "./cctp.js";
-import { chainByDomain, type ChainKey } from "./chains.js";
+import type { ChainKey } from "./chains.js";
 import { openExitBox, usdcBalanceOnBase, type ExitParams } from "./exitbox.js";
 import { inboxQueue, sweepInbox, type InboxSlot, type PrivateBalances } from "./veil.js";
 
@@ -21,7 +21,7 @@ interface JobBase {
 export interface ShieldJob extends JobBase {
   kind: "shield";
   status: "awaiting_funds" | "sweeping" | "screening" | "done" | "expired" | "failed";
-  src: ChainKey;
+  src: ChainKey | "solana";
   /** USDC base units the user is sending */
   amount: string;
   slot: InboxSlot;
@@ -32,8 +32,9 @@ export interface ShieldJob extends JobBase {
 export interface ExitJob extends JobBase {
   kind: "exit";
   status: "proving" | "awaiting_funds" | "opening" | "bridging" | "done" | "failed";
-  to: ChainKey;
-  recipient: Address;
+  to: ChainKey | "solana";
+  /** EVM address, or Solana wallet address */
+  recipient: string;
   amount: string;
   /** Base-only sends withdraw straight to the recipient and have no box */
   params?: Omit<ExitParams, "maxFee" | "relayerFee"> & { maxFee: string; relayerFee: string };
@@ -41,7 +42,7 @@ export interface ExitJob extends JobBase {
   box?: Address;
   withdrawTx?: Hex;
   openTx?: Hex;
-  forwardTx?: Hex;
+  forwardTx?: string;
 }
 
 export type Job = ShieldJob | ExitJob;
@@ -144,7 +145,8 @@ export function startSend(job: ExitJob, kp: Keypair) {
       op: "send",
       key: kp.privkey,
       amount: job.amount,
-      recipient: job.box ?? job.recipient,
+      // Base-only sends have no box, and their recipient is always an EVM address.
+      recipient: job.box ?? (job.recipient as Address),
     });
     if (job.box) update(job, { status: "awaiting_funds", withdrawTx }, `private withdrawal to exit box ${withdrawTx}`);
     else update(job, { status: "done", withdrawTx }, `private withdrawal to recipient ${withdrawTx}`);
@@ -221,8 +223,7 @@ async function advanceExit(job: ExitJob) {
     case "bridging": {
       const s = await burnStatus("base", job.openTx!);
       if (!s.forwardTxHash) return;
-      const dst = chainByDomain(job.params!.destinationDomain).key;
-      update(job, { status: "done", forwardTx: s.forwardTxHash }, `delivered on ${dst} by Circle ${s.forwardTxHash}`);
+      update(job, { status: "done", forwardTx: s.forwardTxHash }, `delivered on ${job.to} by Circle ${s.forwardTxHash}`);
       return;
     }
   }

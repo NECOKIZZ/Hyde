@@ -16,6 +16,7 @@ const veilSignature = z
   .regex(/^0x[0-9a-fA-F]{130}$/, "65-byte EIP-191 signature, 0x-prefixed")
   .describe("Signature of the Veil message (see hyde_setup) from the user's PayBox EVM wallet via request_wallet_sign. Never stored.");
 const chain = z.enum(CHAINS);
+const anyChain = z.enum([...CHAINS, "solana"]);
 const usdc = z.string().regex(/^\d+(\.\d{1,6})?$/, 'USDC amount such as "25" or "25.5"');
 
 const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -119,13 +120,13 @@ export function createServer() {
         message_to_sign: VEIL_MESSAGE,
         how_to_sign:
           "Call PayBox request_wallet_sign with the user's EVM wallet and a personal (EIP-191) message intent over message_to_sign, exactly as written. Use the returned signature as veil_signature.",
-        chains: [...CHAINS],
+        chains: [...CHAINS, "solana"],
         flow: [
           "Instant (Solana): hyde_instant_send pays a Solana address privately from the user's Solana USDC in one approval. No deposit, no waiting; MagicBlock's private rollup breaks the link between sender and recipient. No signature from setup is needed.",
-          "Vault (any chain, strongest privacy):",
-          "1. hyde_deposit moves public USDC from any listed chain into the user's private balance (Veil Cash pool on Base). First deposits clear compliance screening, typically ~15 minutes.",
+          "Vault: deposit from any chain, spend on any chain, privately (strongest privacy):",
+          "1. hyde_deposit (EVM chains) or hyde_deposit_solana moves public USDC into the user's private balance (Veil Cash pool on Base). First deposits clear compliance screening, typically ~15 minutes.",
           "2. hyde_balance shows the private balance.",
-          "3. hyde_send pays anyone on any listed chain from the private balance. Quote first, then confirm. No wallet signature: the user's address never appears in the payment.",
+          "3. hyde_send pays anyone on any listed chain, Solana included, from the private balance. Quote first, then confirm. No wallet signature: the user's address never appears in the payment.",
           "4. hyde_status tracks a send.",
         ],
       };
@@ -204,6 +205,37 @@ export function createServer() {
   );
 
   server.registerTool(
+    "hyde_deposit_solana",
+    {
+      title: "Go private from Solana",
+      description:
+        "Moves public USDC from the user's Solana wallet into their private balance. Returns the exact PayBox request_swap " +
+        "(bridge) arguments to run next: Solana USDC → Base USDC, delivered to the user's private inbox. Minimum 21 USDC.",
+      inputSchema: z.object({ veil_signature: veilSignature, amount: usdc.describe("USDC to send from Solana") }).strict(),
+      outputSchema: z
+        .object({
+          job_id: z.string(),
+          inbox: z.string(),
+          paybox_tool: z.literal("request_swap"),
+          arguments: z.record(z.string(), z.string()),
+          note: z.string(),
+        })
+        .strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      const { data } = await hyde("/v1/deposit/solana", args);
+      return {
+        content: text(
+          `Next: call PayBox request_swap with the user's Solana wallet to bridge ${args.amount} USDC to Base, ` +
+            `recipient ${data.inbox} (the user's private inbox). After it lands, the balance clears screening (typically ~15 min).`,
+        ),
+        structuredContent: data,
+      };
+    },
+  );
+
+  server.registerTool(
     "hyde_balance",
     {
       title: "Private balance",
@@ -230,14 +262,23 @@ export function createServer() {
     {
       title: "Send privately",
       description:
-        "Pays a recipient on any supported chain from the private balance, without the user's wallet appearing on-chain. " +
+        "Pays a recipient on any supported chain, Solana included, from the private balance, without the user's wallet appearing on-chain. " +
+        "For Solana, pass a Solana wallet address as `to` and an EVM fallback_address (refund on Base if the bridge reverts). " +
         "Call without confirm to get a quote and show it to the user; call again with confirm=true only after they agree. " +
         "No PayBox signature is needed.",
       inputSchema: z
         .object({
           veil_signature: veilSignature,
-          to: z.string().regex(/^0x[0-9a-fA-F]{40}$/).describe("Recipient EVM address"),
-          to_chain: chain,
+          to: z
+            .string()
+            .regex(/^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/)
+            .describe("Recipient address: EVM, or a Solana wallet when to_chain is solana"),
+          to_chain: anyChain,
+          fallback_address: z
+            .string()
+            .regex(/^0x[0-9a-fA-F]{40}$/)
+            .optional()
+            .describe("Solana sends only: EVM address that receives the USDC on Base if the bridge reverts"),
           amount: usdc.describe("USDC to spend from the private balance"),
           confirm: z.boolean().optional().describe("true only after the user approved the quote"),
         })

@@ -50,4 +50,34 @@ describe("ExitBox on a Base mainnet fork (real CCTP)", function () {
     expect(logs[0].args.depositor!.toLowerCase()).to.equal(box.toLowerCase());
     expect(await publicClient.readContract({ address: USDC, abi: erc20Abi, functionName: "balanceOf", args: [relayer.account.address] })).to.equal(50_000n);
   });
+
+  it("burns with Circle forwarding toward a Solana USDC token account", async () => {
+    const publicClient = await hre.viem.getPublicClient();
+    const [, relayer, fallback] = await hre.viem.getWalletClients();
+    const factory = await hre.viem.deployContract("ExitBoxFactory", [USDC, TOKEN_MESSENGER_V2]);
+    // Any 32-byte Solana token account; CCTP on Base does not validate it.
+    const solanaTokenAccount = keccak256(toHex("solana-usdc-ata"));
+    const params = {
+      destinationDomain: 5,
+      mintRecipient: solanaTokenAccount,
+      minFinalityThreshold: 1000,
+      maxFee: 250_000n,
+      fallbackRecipient: fallback.account.address,
+      relayer: relayer.account.address,
+      relayerFee: 30_000n,
+    };
+    const salt = keccak256(toHex("fork-test-solana"));
+    const box = await factory.read.boxAddress([params, salt]);
+    await hre.network.provider.request({ method: "hardhat_impersonateAccount", params: [USDC_HOLDER] });
+    await hre.network.provider.request({ method: "hardhat_setBalance", params: [USDC_HOLDER, toHex(parseEther("1"))] });
+    const holder = await hre.viem.getWalletClient(USDC_HOLDER);
+    await holder.writeContract({ address: USDC, abi: erc20Abi, functionName: "transfer", args: [box, 10_000_000n] });
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: await factory.write.open([params, salt], { account: relayer.account }) });
+    const logs = await publicClient.getLogs({ address: TOKEN_MESSENGER_V2, event: DEPOSIT_FOR_BURN, blockHash: receipt.blockHash });
+    expect(logs).to.have.length(1);
+    expect(logs[0].args.destinationDomain).to.equal(5);
+    expect(logs[0].args.mintRecipient).to.equal(solanaTokenAccount);
+    expect(logs[0].args.amount).to.equal(9_970_000n);
+  });
 });

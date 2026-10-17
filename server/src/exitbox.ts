@@ -43,22 +43,20 @@ export function exitBoxFactoryAddress(): Address {
   return addr;
 }
 
+/** `mintRecipient` is a left-padded EVM address, or a Solana USDC token account. */
 export function exitParams(opts: {
-  to: ChainKey;
-  recipient: Address;
+  destinationDomain: number;
+  mintRecipient: Hex;
+  fallbackRecipient: Address;
   maxFee: bigint;
   relayer: Address;
   relayerFee: bigint;
 }): ExitParams {
-  return {
-    destinationDomain: chainInfo(opts.to).domain,
-    mintRecipient: pad(opts.recipient),
-    minFinalityThreshold: CCTP_FAST,
-    maxFee: opts.maxFee,
-    fallbackRecipient: opts.recipient,
-    relayer: opts.relayer,
-    relayerFee: opts.relayerFee,
-  };
+  return { ...opts, minFinalityThreshold: CCTP_FAST };
+}
+
+export function evmRecipient(to: ChainKey, recipient: Address) {
+  return { destinationDomain: chainInfo(to).domain, mintRecipient: pad(recipient), fallbackRecipient: recipient };
 }
 
 /** CREATE2 address of the box, computed offline (mirrors ExitBoxFactory.boxAddress). */

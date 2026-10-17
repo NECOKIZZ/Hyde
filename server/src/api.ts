@@ -6,11 +6,16 @@ import { z } from "zod";
 import { approveCall, burnCall, formatUsdc, maxFeeFor, parseUsdc, quoteFees, transferCall, type UnsignedCall } from "./cctp.js";
 import { CHAIN_KEYS, chainInfo, type ChainKey } from "./chains.js";
 import { relayerAccount } from "./clients.js";
-import { exitParams, predictExitBox } from "./exitbox.js";
+import { evmRecipient, exitParams, predictExitBox } from "./exitbox.js";
+import { SOLANA, isSolanaAddress, toBytes32, usdcAccountExists, usdcTokenAccount } from "./solana.js";
 import { createJob, getJob, pendingShields, requestBalance, startSend, type ExitJob, type Job, type ShieldJob } from "./jobs.js";
 import { MIN_SHIELD_USDC, inboxSlot, keypairFrom } from "./veil.js";
 
 const chain = z.enum(CHAIN_KEYS);
+const anyChain = z.enum([...CHAIN_KEYS, "solana"]);
+const BASE_DOMAIN = chainInfo("base").domain;
+/** Solana deposits go through PayBox's own bridge; leave room for its fees above Veil's minimum. */
+const MIN_SOLANA_DEPOSIT = 21_000_000n;
 const usdc = z.string().regex(/^\d+(\.\d{1,6})?$/);
 const auth = z
   .object({ veil_signature: z.string().optional(), veil_key: z.string().optional() })
@@ -81,7 +86,7 @@ export function buildApi() {
   api.get("/info", route(async () => ({
     body: {
       sign_this_message: VEIL_SIGNED_MESSAGE,
-      chains: CHAIN_KEYS.map((k) => ({ key: k, name: chainInfo(k).name })),
+      chains: [...CHAIN_KEYS.map((k) => ({ key: k, name: chainInfo(k).name })), { key: SOLANA.key, name: SOLANA.name }],
       min_deposit_usdc: formatUsdc(MIN_SHIELD_USDC),
       relayer_fee_usdc: formatUsdc(relayerFee()),
     },
@@ -113,7 +118,7 @@ export function buildApi() {
     if (step === "approve") {
       return { body: { step, next_step: "bridge", call: callView(approveCall(body.from_chain, amount)) } };
     }
-    const fees = await quoteFees(body.from_chain, "base");
+    const fees = await quoteFees(chainInfo(body.from_chain).domain, BASE_DOMAIN);
     const maxFee = maxFeeFor(amount, fees);
     if (amount - maxFee < MIN_SHIELD_USDC) {
       throw new ApiError(422, `At least ${formatUsdc(MIN_SHIELD_USDC)} USDC must reach Base after up to ${formatUsdc(maxFee)} USDC of bridge fees.`);
@@ -128,6 +133,33 @@ export function buildApi() {
         bridge_fee_at_most: formatUsdc(maxFee),
         arrives_at_least: formatUsdc(amount - maxFee),
         call: callView(burnCall({ src: body.from_chain, dst: "base", amount, recipient: slot.forwarderAddress, maxFee })),
+      },
+    };
+  }));
+
+  // Go private from Solana. A CCTP burn on Solana needs a second (event account) signer, which PayBox
+  // proposals don't allow, so the agent uses PayBox's own bridge to deliver into the Veil inbox.
+  api.post("/deposit/solana", route(async (req) => {
+    const body = auth.and(z.object({ amount: usdc })).parse(req.body);
+    const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
+    const amount = parseUsdc(body.amount);
+    if (amount < MIN_SOLANA_DEPOSIT) throw new ApiError(422, `Minimum from Solana is ${formatUsdc(MIN_SOLANA_DEPOSIT)} USDC (bridge fees come off first).`);
+    const slot = await inboxSlot(kp);
+    const job = createJob<ShieldJob>({ kind: "shield", status: "awaiting_funds", src: "solana", amount: amount.toString(), slot });
+    return {
+      body: {
+        job_id: job.id,
+        inbox: slot.forwarderAddress,
+        paybox_tool: "request_swap",
+        arguments: {
+          src_chain: "solana",
+          dst_chain: "base",
+          src_token: SOLANA.usdcMint,
+          dst_token: chainInfo("base").usdc,
+          amount: body.amount,
+          recipient: slot.forwarderAddress,
+        },
+        note: "Bridge with PayBox request_swap using these values (field formats per your PayBox tool schema). The recipient must be the inbox address exactly. At least 20.1 USDC must arrive on Base.",
       },
     };
   }));
@@ -153,12 +185,27 @@ export function buildApi() {
 
   api.post("/send", route(async (req) => {
     const body = auth
-      .and(z.object({ to: z.string(), to_chain: chain, amount: usdc, confirm: z.boolean().optional() }))
+      .and(z.object({ to: z.string(), to_chain: anyChain, amount: usdc, fallback_address: z.string().optional(), confirm: z.boolean().optional() }))
       .parse(req.body);
-    if (!isAddress(body.to)) throw new ApiError(400, "to must be an EVM address");
-    const recipient = getAddress(body.to);
     const amount = parseUsdc(body.amount);
-    const to: ChainKey = body.to_chain;
+    const to = body.to_chain;
+    let recipient: string;
+    let target: ReturnType<typeof evmRecipient>;
+    if (to === "solana") {
+      if (!isSolanaAddress(body.to)) throw new ApiError(400, "to must be a Solana wallet address");
+      if (!body.fallback_address || !isAddress(body.fallback_address)) {
+        throw new ApiError(400, "Sending to Solana needs fallback_address: an EVM address that receives the USDC on Base if the bridge reverts.");
+      }
+      if (!(await usdcAccountExists(body.to))) {
+        throw new ApiError(422, "The recipient has no USDC account on Solana yet. Ask them to receive any USDC once first (CCTP can only mint into an existing account).");
+      }
+      recipient = body.to;
+      target = { destinationDomain: SOLANA.domain, mintRecipient: toBytes32(usdcTokenAccount(body.to)), fallbackRecipient: getAddress(body.fallback_address) };
+    } else {
+      if (!isAddress(body.to)) throw new ApiError(400, "to must be an EVM address");
+      recipient = getAddress(body.to);
+      target = evmRecipient(to, recipient as `0x${string}`);
+    }
 
     let quote: Record<string, string>;
     let job: Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">;
@@ -167,12 +214,12 @@ export function buildApi() {
       job = { kind: "exit", status: "proving", to, recipient, amount: amount.toString() };
     } else {
       const fee = relayerFee();
-      const maxFee = maxFeeFor(amount - fee, await quoteFees("base", to));
+      const maxFee = maxFeeFor(amount - fee, await quoteFees(BASE_DOMAIN, target.destinationDomain));
       if (amount <= fee + maxFee) throw new ApiError(422, `Too small: fees are up to ${formatUsdc(fee + maxFee)} USDC.`);
-      const params = exitParams({ to, recipient, maxFee, relayer: relayerAccount().address, relayerFee: fee });
+      const params = exitParams({ ...target, maxFee, relayer: relayerAccount().address, relayerFee: fee });
       const salt = toHex(randomBytes(32));
       quote = {
-        route: `Veil pool (Base) → one-time exit box → Circle CCTP → ${chainInfo(to).name}`,
+        route: `Veil pool (Base) → one-time exit box → Circle CCTP → ${to === "solana" ? SOLANA.name : chainInfo(to).name}`,
         you_spend: body.amount,
         relayer_fee: formatUsdc(fee),
         bridge_fee_at_most: formatUsdc(maxFee),

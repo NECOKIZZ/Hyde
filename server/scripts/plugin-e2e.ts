@@ -153,6 +153,22 @@ try {
   assert.equal(balance.structuredContent.spendable_usdc, "0");
   assert.ok(balance.structuredContent.pending_deposits.length >= 2, "deposits are tracked against the inbox");
 
+  // Solana in: instructions for PayBox's own bridge, delivering to the same Veil inbox.
+  const solIn = await callTool("hyde_deposit_solana", { veil_signature, amount: "25" });
+  assert.equal(solIn.structuredContent.paybox_tool, "request_swap");
+  assert.equal(solIn.structuredContent.arguments.recipient.toLowerCase(), inbox.toLowerCase());
+  assert.equal(solIn.structuredContent.arguments.src_chain, "solana");
+  assert.equal((await callTool("hyde_deposit_solana", { veil_signature, amount: "5" })).isError, true);
+
+  // Solana out: quote to a wallet that has a USDC account; refuse wallets without one, and missing fallbacks.
+  const SOL_WITH_USDC = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+  const solQuote = await callTool("hyde_send", { veil_signature, to: SOL_WITH_USDC, to_chain: "solana", amount: "20", fallback_address: wallet.address });
+  assert.equal(solQuote.structuredContent.status, "quote");
+  assert.match(solQuote.structuredContent.route, /Solana/);
+  assert.ok(Number(solQuote.structuredContent.recipient_receives_at_least) > 19.6);
+  assert.equal((await callTool("hyde_send", { veil_signature, to: SOL_WITH_USDC, to_chain: "solana", amount: "20" })).isError, true);
+  assert.equal((await callTool("hyde_send", { veil_signature, to: "Bt9oNR5cCtnfuMmXgWELd6q5i974PdEMQDUE55nBC57L", to_chain: "solana", amount: "20", fallback_address: wallet.address })).isError, true);
+
   const quote = await callTool("hyde_send", { veil_signature, to: "0x000000000000000000000000000000000000bEEF", to_chain: "arbitrum", amount: "20" });
   assert.equal(quote.structuredContent.status, "quote");
   assert.ok(Number(quote.structuredContent.recipient_receives_at_least) > 19.8);

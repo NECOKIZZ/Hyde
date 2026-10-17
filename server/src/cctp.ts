@@ -27,8 +27,9 @@ export interface FeeQuote {
   forwardFee: bigint;
 }
 
-export async function quoteFees(src: ChainKey, dst: ChainKey): Promise<FeeQuote> {
-  const url = `${IRIS}/v2/burn/USDC/fees/${chainInfo(src).domain}/${chainInfo(dst).domain}?forward=true`;
+/** Fee quote between two CCTP domains (Solana is domain 5). */
+export async function quoteFees(srcDomain: number, dstDomain: number): Promise<FeeQuote> {
+  const url = `${IRIS}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`;
   const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
   if (!res.ok) throw new Error(`CCTP fee quote failed: ${res.status}`);
   const tiers = (await res.json()) as { finalityThreshold: number; minimumFee: number; forwardFee?: { high: number } }[];
@@ -88,8 +89,8 @@ export function transferCall(chain: ChainKey, to: Address, amount: bigint, descr
 
 export interface BurnStatus {
   status: "pending" | "attested";
-  /** Destination mint tx submitted by Circle's Forwarding Service, once known */
-  forwardTxHash?: Hex;
+  /** Destination mint tx (EVM hash or Solana signature) submitted by Circle's Forwarding Service */
+  forwardTxHash?: string;
 }
 
 export async function burnStatus(src: ChainKey, burnTxHash: Hex): Promise<BurnStatus> {
@@ -98,7 +99,7 @@ export async function burnStatus(src: ChainKey, burnTxHash: Hex): Promise<BurnSt
   });
   if (res.status === 404) return { status: "pending" };
   if (!res.ok) throw new Error(`CCTP attestation lookup failed: ${res.status}`);
-  const body = (await res.json()) as { messages?: { status: string; forwardTxHash?: Hex }[] };
+  const body = (await res.json()) as { messages?: { status: string; forwardTxHash?: string }[] };
   const msg = body.messages?.[0];
   if (!msg || msg.status !== "complete") return { status: "pending" };
   return { status: "attested", forwardTxHash: msg.forwardTxHash || undefined };

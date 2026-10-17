@@ -1,13 +1,24 @@
 # Hyde
 
-**Private USDC payments for PayBox agents, from and to any major chain.**
+**Deposit from any chain. Spend on any chain. Privately.**
+
+Private USDC payments for PayBox agents across Ethereum, Arbitrum, OP, Polygon, Avalanche, Base and Solana.
 
 PayBox gives an agent scoped, passkey-approved access to your wallet. Hyde adds private payments, on two rails:
 
 | Rail | Speed | Hides | How |
 |---|---|---|---|
 | **Instant** (Solana) | One approval, settles in seconds | The link between sender and recipient | [MagicBlock Private Payments](https://docs.magicblock.gg/pages/ephemeral-spl-token/private-payments.md): the transfer is queued through a TEE-backed private rollup, optionally with a random 1–10 min delay |
-| **Vault** (Ethereum, Arbitrum, OP, Polygon, Avalanche, Base) | Go private once (~15 min first-time screening), then send in minutes | Sender, recipient link and balance | Veil Cash shielded pool on Base + Circle CCTP in and out |
+| **Vault** (all 7 chains, in and out) | Go private once (~15 min first-time screening), then send in minutes | Sender, recipient link and balance | Veil Cash shielded pool on Base + Circle CCTP in and out |
+
+### Vault routes
+
+| From → To | How |
+|---|---|
+| Any EVM chain → private balance | `hyde_deposit` (CCTP burn, Circle forwards to your Veil inbox) |
+| Solana → private balance | `hyde_deposit_solana` → PayBox `request_swap` to your Veil inbox (a CCTP burn on Solana needs a second signer, which plugin proposals can't carry) |
+| Private balance → any EVM chain | `hyde_send` (ExitBox → CCTP → Circle delivers) |
+| Private balance → Solana | `hyde_send` with `to_chain: "solana"`: ExitBox mints into the recipient's USDC token account (must already exist) |
 
 > "Pay 50 USDC to 0xBob… on Arbitrum, privately." The agent quotes it, you agree, and Bob is paid by a
 > one-time contract that bridged out of a shielded pool. Nothing on-chain connects Bob to you.
@@ -49,9 +60,10 @@ your PayBox wallet
 |---|---|---|
 | `hyde_setup` | Explains both rails and returns the message to sign (Vault only) | — |
 | `hyde_instant_send` | Private USDC payment to a Solana address right now (MagicBlock) | Solana proposal |
-| `hyde_deposit` | Go private. Base: one USDC transfer. Other chains: `step: approve`, then `step: bridge` | EVM proposal each step |
+| `hyde_deposit` | Go private from an EVM chain. Base: one USDC transfer. Others: `step: approve`, then `step: bridge` | EVM proposal each step |
+| `hyde_deposit_solana` | Go private from Solana: returns the PayBox `request_swap` to run | Agent runs PayBox's bridge |
 | `hyde_balance` | Spendable / clearing / screening balances (poll while `computing`) | — |
-| `hyde_send` | Quote, then `confirm: true` to pay a recipient on any supported chain | **none** |
+| `hyde_send` | Quote, then `confirm: true` to pay a recipient on any of the 7 chains | **none** |
 | `hyde_status` | Track a send by `job_id` | — |
 
 Every call returns within PayBox's 10-second budget: slow work (pool scans, Groth16 proofs) runs on the
