@@ -1,0 +1,23 @@
+# Render blueprint for the Hyde API (the PayBox plugin's backend).
+services:
+  - type: web
+    name: hyde-api
+    runtime: docker
+    rootDir: server
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: hyde-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: HYDE_API_KEY
+        generateValue: true
+      - key: RELAYER_PRIVATE_KEY
+        sync: false
+      - key: EXIT_BOX_FACTORY
+        sync: false
+      - key: RELAYER_FEE_USDC
+        value: "0.03"
+      - key: BASE_RPC_URL
+        sync: false

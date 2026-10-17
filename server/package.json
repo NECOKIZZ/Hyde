@@ -1,0 +1,28 @@
+{
+  "name": "hyde-api",
+  "version": "1.0.0",
+  "description": "Hyde backend: Veil proofs, exit boxes and job tracking for the Hyde PayBox plugin",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --import tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
+    "test:e2e": "tsx scripts/plugin-e2e.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@veil-cash/sdk": "^0.7.0",
+    "express": "^4.22.3",
+    "viem": "^2.57.7",
+    "zod": "^3.25.76",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.6.3"
+  },
+  "type": "module"
+}

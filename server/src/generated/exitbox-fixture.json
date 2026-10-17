@@ -1,0 +1,44 @@
+{
+  "factory": "0xc5a5c42992decbae36851359345fe25997f5c42d",
+  "cases": [
+    {
+      "params": {
+        "destinationDomain": 0,
+        "mintRecipient": "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "minFinalityThreshold": 1000,
+        "maxFee": "60000",
+        "fallbackRecipient": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "relayer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "relayerFee": "50000"
+      },
+      "salt": "0x28e1f661c4ab9d34e26ea6514c07301e16faf99318843f75e11b7d56bd57807c",
+      "box": "0x24bD8e293616Ffb9DF4B61e3b45326eE2C80Eb92"
+    },
+    {
+      "params": {
+        "destinationDomain": 3,
+        "mintRecipient": "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "minFinalityThreshold": 1000,
+        "maxFee": "1060000",
+        "fallbackRecipient": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "relayer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "relayerFee": "100000"
+      },
+      "salt": "0x26e9840acf58ba86690e67c03e21cf541cefc52f8c6aee1d8fde5986f89180a2",
+      "box": "0x7305474179AE2E9E592418bA007064DC601F0EeC"
+    },
+    {
+      "params": {
+        "destinationDomain": 7,
+        "mintRecipient": "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "minFinalityThreshold": 1000,
+        "maxFee": "2060000",
+        "fallbackRecipient": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "relayer": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "relayerFee": "150000"
+      },
+      "salt": "0x309a65fb4c95d87a9b67c21ca029d0e120baab30d9931785d1408f9886cc71e2",
+      "box": "0x704483b907A2C3A40a27b67cBcaCF8b17b3bb716"
+    }
+  ]
+}
