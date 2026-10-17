@@ -7,7 +7,7 @@ const app = express();
 app.disable("x-powered-by");
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "hyde-api" });
+  res.json({ ok: true, service: "hyde-api", commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) });
 });
 app.use("/v1", buildApi());
 

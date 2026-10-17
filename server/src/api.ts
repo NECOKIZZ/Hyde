@@ -1,15 +1,15 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { VEIL_SIGNED_MESSAGE } from "@veil-cash/sdk";
-import { getAddress, isAddress, isHex, toHex, type Hex } from "viem";
+import { erc20Abi, formatEther, getAddress, isAddress, isHex, parseEther, toHex, type Address, type Hex } from "viem";
 import { z } from "zod";
-import { approveCall, burnCall, formatUsdc, maxFeeFor, parseUsdc, quoteFees, transferCall, type UnsignedCall } from "./cctp.js";
+import { approveCall, burnCall, formatUsdc, maxFeeFor, parseUsdc, quoteFees, type UnsignedCall } from "./cctp.js";
 import { CHAIN_KEYS, chainInfo, type ChainKey } from "./chains.js";
-import { relayerAccount } from "./clients.js";
-import { evmRecipient, exitParams, predictExitBox, usdcBalanceOnBase } from "./exitbox.js";
+import { publicClient, relayerAccount } from "./clients.js";
+import { evmRecipient, exitParams, predictExitBox } from "./exitbox.js";
 import { SOLANA, isSolanaAddress, toBytes32, usdcAccountExists, usdcTokenAccount } from "./solana.js";
 import { createJob, getJob, requestBalance, startPayroll, startSend, type ExitJob, type Job, type PayrollJob } from "./jobs.js";
-import { MIN_SHIELD_USDC, keypairFrom, nextDepositStep, ownerFromSignature } from "./veil.js";
+import { MIN_SHIELD_USDC, keypairFrom, nextDepositStep, ownerFromSignature, pendingDepositOf } from "./veil.js";
 
 const chain = z.enum(CHAIN_KEYS);
 const anyChain = z.enum([...CHAIN_KEYS, "solana"]);
@@ -103,6 +103,36 @@ async function prepareExit(p: Payee, opts: { exactOut: boolean }): Promise<{ quo
   };
 }
 
+/** Native gas a wallet needs for the remaining deposit steps; Base transactions cost well under this. */
+const MIN_DEPOSIT_GAS = parseEther("0.000005");
+/** Hyde's relayer pays gas to open each exit box; refuse sends it could not finish. */
+const RELAYER_GAS_PER_BOX = parseEther("0.00001");
+
+/** Refuses a deposit step the wallet can't complete, before anything is proposed. */
+async function assertCanDeposit(src: ChainKey, owner: Address, amount: bigint) {
+  const client = publicClient(src);
+  const [usdcBal, gas] = await Promise.all([
+    client.readContract({ address: chainInfo(src).usdc, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
+    client.getBalance({ address: owner }),
+  ]);
+  const name = chainInfo(src).name;
+  if (usdcBal < amount) {
+    throw new ApiError(422, `Your wallet ${owner} has ${formatUsdc(usdcBal)} USDC on ${name}; this deposit needs ${formatUsdc(amount)}. Nothing was proposed.`);
+  }
+  if (gas < MIN_DEPOSIT_GAS) {
+    throw new ApiError(422, `Your wallet ${owner} needs a little ${src === "polygon" ? "POL" : src === "avalanche" ? "AVAX" : "ETH"} on ${name} for gas (has ${formatEther(gas)}). Nothing was proposed.`);
+  }
+}
+
+/** Refuses a send or payroll Hyde's relayer couldn't deliver, so funds never wait in an unopened exit box. */
+async function assertRelayerCanOpen(boxes: number) {
+  if (boxes === 0) return;
+  const have = await publicClient("base").getBalance({ address: relayerAccount().address });
+  if (have < RELAYER_GAS_PER_BOX * BigInt(boxes)) {
+    throw new ApiError(503, "Hyde's relayer is low on gas to deliver cross-chain payments right now. Nothing was sent; try again later or pay on Base.");
+  }
+}
+
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -188,6 +218,12 @@ export function buildApi() {
 
     if (body.from_chain === "base") {
       if (amount < MIN_SHIELD_USDC) throw new ApiError(422, `Minimum deposit is ${formatUsdc(MIN_SHIELD_USDC)} USDC (Veil's minimum is 20 USDC after its 0.3% fee).`);
+      // A deposit already waiting on screening means the last run finished: proposing again would deposit twice.
+      const pending = await pendingDepositOf(owner);
+      if (pending > 0n) {
+        throw new ApiError(409, `You already have ${formatUsdc(pending)} USDC deposited and waiting on Veil's screening (typically ~15 min). Nothing new was proposed; check hyde_balance.`);
+      }
+      await assertCanDeposit("base", owner, amount);
       const tx = await nextDepositStep(owner, kp, amount);
       const what = {
         register: "Register your private key with Veil (one time only)",
@@ -206,6 +242,7 @@ export function buildApi() {
     }
 
     const step = body.step ?? "approve";
+    await assertCanDeposit(body.from_chain, owner, amount);
     if (step === "approve") {
       return { body: { step, next_step: "bridge", wallet: owner, call: callView(approveCall(body.from_chain, amount)) } };
     }
@@ -275,6 +312,7 @@ export function buildApi() {
     if (!body.confirm) return { body: { status: "quote", ...prepared.quote, next: "Show this to the user; call again with confirm=true to send." } };
 
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
+    await assertRelayerCanOpen(prepared.job.box ? 1 : 0);
     const created = createJob<ExitJob>(prepared.job);
     startSend(created, kp);
     return { status: 202, body: { status: "sending", job_id: created.id, ...prepared.quote, next: "Poll the job; delivery usually takes 1–3 minutes." } };
@@ -305,6 +343,7 @@ export function buildApi() {
     };
     if (!body.confirm) return { body: { status: "quote", ...summary, next: "Show this to the user; call again with confirm=true to pay everyone." } };
 
+    await assertRelayerCanOpen(prepared.filter((p) => p.job.box).length);
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
     const run = createJob<PayrollJob>({
       kind: "payroll",

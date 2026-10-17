@@ -186,7 +186,10 @@ export function createServer() {
         "waiting for each proposed transaction to confirm before the next call; each call proposes the next step (register once, " +
         "approve, deposit) until step is \"deposit\". From another chain: step=approve, then step=bridge (Circle delivers to the user's " +
         "own Base wallet), then the Base steps for the amount that arrived. Minimum 20.1 USDC on Base. After the deposit confirms, " +
-        "poll hyde_balance until spendable_usdc covers the payment (first deposit: ~15 min screening).",
+        "poll hyde_balance until spendable_usdc covers the payment (first deposit: ~15 min screening). Before calling, check " +
+        "get_portfolio: the wallet needs the USDC plus a little gas on that chain. Hyde refuses (and proposes nothing) when funds " +
+        "or gas are short, or when a deposit is already waiting on screening: relay that message to the user and do not retry or " +
+        "switch tools.",
       inputSchema: z
         .object({
           veil_signature: veilSignature,

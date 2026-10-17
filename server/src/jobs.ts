@@ -47,6 +47,7 @@ export type Job = ExitJob | PayrollJob;
 
 const FILE = process.env.JOBS_FILE ?? "data/jobs.json";
 const jobs = new Map<string, Job>();
+const EXIT_FUNDS_WAIT_MS = 30 * 60_000;
 
 export function loadJobs() {
   try {
@@ -54,8 +55,15 @@ export function loadJobs() {
       if (j.kind === "shield") continue; // inbox deposits are gone: deposits now go straight from the wallet
       // A proof in flight dies with the process; the funds never left the private balance.
       if (j.kind === "exit" && j.status === "proving") {
-        j.status = "failed";
-        j.error = "Server restarted before the private withdrawal was submitted. Nothing moved; send again.";
+        if (j.box) {
+          // The withdrawal may have landed just before the restart: keep watching the box (it gives up
+          // after EXIT_FUNDS_WAIT_MS if nothing arrives).
+          j.status = "awaiting_funds";
+          j.log.push(`${new Date().toISOString()} server restarted mid-send; watching the exit box in case the withdrawal landed`);
+        } else {
+          j.status = "failed";
+          j.error = "Server restarted during the send. Check whether the recipient was paid before sending again.";
+        }
       } else if (j.kind === "payroll" && ["checking", "sending"].includes(j.status)) {
         j.status = "partial";
         j.error = "Server restarted mid-run. Payees with a job_id were paid or are in flight; check them before re-running the rest.";
@@ -82,6 +90,9 @@ export function update(job: Job, patch: Partial<Job>, line?: string) {
 export function createJob<T extends Job>(job: Omit<T, "id" | "createdAt" | "updatedAt" | "log">): T {
   const now = new Date().toISOString();
   const full = { ...job, id: randomUUID(), createdAt: now, updatedAt: now, log: [] } as unknown as T;
+  // The job file can be lost on hosts without a disk. Exit boxes can be opened by anyone who knows
+  // their params and salt, so log them: the host's logs are then enough to deliver a stranded payment.
+  if (full.kind === "exit" && full.box) console.log(`exitbox ${full.id} ${JSON.stringify({ box: full.box, salt: full.salt, params: full.params })}`);
   jobs.set(full.id, full);
   update(full, {}, `created (${full.status})`);
   return full;
@@ -220,7 +231,12 @@ export function requestBalance(kp: Keypair, owner?: Address): BalanceEntry {
 async function advanceExit(job: ExitJob) {
   switch (job.status) {
     case "awaiting_funds": {
-      if ((await usdcBalanceOnBase(job.box!)) === 0n) return;
+      if ((await usdcBalanceOnBase(job.box!)) === 0n) {
+        if (Date.now() - Date.parse(job.updatedAt) > EXIT_FUNDS_WAIT_MS) {
+          update(job, { status: "failed", error: "The private withdrawal never reached the exit box. Nothing moved; send again." }, "gave up waiting for funds");
+        }
+        return;
+      }
       update(job, { status: "opening" }, "withdrawal landed in the exit box");
       return;
     }

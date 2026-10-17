@@ -7,6 +7,7 @@ import {
   buildRegisterTx,
   deriveSubaccountSlot,
   getAddresses,
+  getQueueAddress,
   getQueueBalance,
   withdraw,
   type SubaccountSlot,
@@ -75,6 +76,36 @@ export async function nextDepositStep(owner: Address, kp: Keypair, amount: bigin
   const allowance = await client.readContract({ address: usdcToken, abi: erc20Abi, functionName: "allowance", args: [owner, entry] });
   if (allowance < amount) return { step: "approve", ...buildApproveUSDCTx({ amount: formatUsdc(amount) }) };
   return { step: "deposit", ...buildDepositUSDCTx({ depositKey, amount: formatUsdc(amount) }) };
+}
+
+const QUEUE_PENDING_ABI = [
+  {
+    type: "function",
+    name: "getPendingDepositsWithData",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      {
+        type: "tuple[]",
+        components: [
+          { name: "nonce", type: "uint256" },
+          { name: "fallbackReceiver", type: "address" },
+          { name: "amountIn", type: "uint256" },
+          { name: "fee", type: "uint256" },
+          { name: "shieldAmount", type: "uint256" },
+          { name: "timestamp", type: "uint256" },
+          { name: "status", type: "uint8" },
+          { name: "depositKey", type: "bytes" },
+        ],
+      },
+    ],
+  },
+] as const;
+
+/** USDC this wallet has queued with Veil that is still waiting on screening (base units, after Veil's fee). */
+export async function pendingDepositOf(owner: Address): Promise<bigint> {
+  const pending = await publicClient("base").readContract({ address: getQueueAddress("usdc"), abi: QUEUE_PENDING_ABI, functionName: "getPendingDepositsWithData" });
+  return pending.filter((d) => d.fallbackReceiver.toLowerCase() === owner.toLowerCase()).reduce((sum, d) => sum + d.shieldAmount, 0n);
 }
 
 export interface PrivateBalances {

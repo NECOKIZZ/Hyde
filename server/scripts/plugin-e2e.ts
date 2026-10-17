@@ -5,9 +5,8 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import http from "node:http";
 import { createInterface } from "node:readline";
-import { decodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { ENTRY_ABI, VEIL_SIGNED_MESSAGE, getAddresses } from "@veil-cash/sdk";
+import { VEIL_SIGNED_MESSAGE } from "@veil-cash/sdk";
 
 const NODE24 = process.env.NODE24 ?? "/opt/node24/bin/node";
 const PLUGIN = new URL("../../plugin/dist/plugin.mjs", import.meta.url).pathname;
@@ -113,29 +112,17 @@ try {
   assert.equal((await callTool("hyde_instant_send", { sender: SENDER, to: SENDER, amount: "1" })).isError, true);
   assert.equal((await callTool("hyde_instant_send", { sender: "not-a-key", to: RECIPIENT, amount: "1" })).isError, true);
 
-  // A fresh wallet must register its Veil key first: the proposal is Veil's Entry.register, from the wallet itself.
-  const fromBase = await callTool("hyde_deposit", { veil_signature, from_chain: "base", amount: "25" });
-  const p1 = proposal(fromBase);
-  assert.equal(p1.kind, "evm");
-  assert.equal(p1.chain, "eip155:8453");
-  assert.equal(p1.transaction.to.toLowerCase(), getAddresses().entry.toLowerCase());
-  const reg = decodeFunctionData({ abi: ENTRY_ABI, data: p1.transaction.data });
-  assert.equal(reg.functionName, "register");
-  assert.equal((reg.args![0] as { owner: string }).owner.toLowerCase(), wallet.address.toLowerCase());
-
-  const approve = proposal(await callTool("hyde_deposit", { veil_signature, from_chain: "arbitrum", amount: "25", step: "approve" }));
-  assert.equal(approve.chain, "eip155:42161");
-  assert.equal(decodeFunctionData({ abi: erc20Abi, data: approve.transaction.data }).functionName, "approve");
-
-  const bridge = proposal(await callTool("hyde_deposit", { veil_signature, from_chain: "arbitrum", amount: "25", step: "bridge" }));
-  const burn = decodeFunctionData({
-    abi: parseAbi(["function depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)"]),
-    data: bridge.transaction.data,
-  });
-  assert.equal(bridge.transaction.to, "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
-  assert.equal(burn.args[1], 6, "destination is Base");
-  assert.equal(`0x${burn.args[2].slice(26)}`.toLowerCase(), wallet.address.toLowerCase(), "mints to the user's own Base wallet");
-  assert.ok(burn.args[5] > 0n && burn.args[5] < 1_000_000n, "fee cap is sane");
+  // The test wallet holds no USDC: every deposit route must refuse before proposing anything.
+  // (The proposal shapes are exercised against real contracts by demo/run-demo.ts on a Base fork.)
+  for (const args of [
+    { from_chain: "base", amount: "25" },
+    { from_chain: "arbitrum", amount: "25", step: "approve" },
+    { from_chain: "arbitrum", amount: "25", step: "bridge" },
+  ]) {
+    const refused = await callTool("hyde_deposit", { veil_signature, ...args });
+    assert.equal(refused.isError, true, `unfunded ${args.from_chain} deposit is refused`);
+    assert.match(refused.content[0].text, /Nothing was proposed/);
+  }
 
   const tooSmall = await callTool("hyde_deposit", { veil_signature, from_chain: "base", amount: "5" });
   assert.equal(tooSmall.isError, true);
@@ -188,7 +175,14 @@ try {
   assert.equal(badPayee.isError, true);
   assert.match(badPayee.content[0].text, /Payee 2/);
 
-  const run = await callTool("hyde_payroll", { veil_signature, payees, confirm: true });
+  // Cross-chain payees need Hyde's relayer to have gas; this test relayer has none, so nothing may start.
+  const noGas = await callTool("hyde_payroll", { veil_signature, payees, confirm: true });
+  assert.equal(noGas.isError, true);
+  assert.match(noGas.content[0].text, /relayer is low on gas/);
+
+  // Base-only payroll needs no relayer: it must stop on the short private balance with nobody paid.
+  const basePayees = payees.filter((p) => p.to_chain === "base");
+  const run = await callTool("hyde_payroll", { veil_signature, payees: basePayees, confirm: true });
   assert.equal(run.structuredContent.status, "sending");
   let runStatus;
   for (let i = 0; i < 30; i++) {
