@@ -181,6 +181,8 @@ export function buildApi() {
   // Go private: one unsigned call per step. Cross-chain needs "approve" then "bridge".
   api.post("/deposit", route(async (req) => {
     const body = auth.and(z.object({ from_chain: chain, amount: usdc, step: z.enum(["approve", "bridge"]).optional() })).parse(req.body);
+    // Veil's relay no longer deploys/sweeps inbox forwarders, so funds sent to an inbox can't move on.
+    throw new ApiError(503, "Vault deposits are paused: Veil's relay stopped processing deposit inboxes. Nothing was proposed and no funds moved. Use hyde_instant_send on Solana meanwhile.");
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
     const amount = parseUsdc(body.amount);
     const slot = await inboxSlot(kp);
@@ -227,6 +229,7 @@ export function buildApi() {
   // proposals don't allow, so the agent uses PayBox's own bridge to deliver into the Veil inbox.
   api.post("/deposit/solana", route(async (req) => {
     const body = auth.and(z.object({ amount: usdc })).parse(req.body);
+    throw new ApiError(503, "Vault deposits are paused: Veil's relay stopped processing deposit inboxes. Nothing was proposed and no funds moved. Use hyde_instant_send on Solana meanwhile.");
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
     const amount = parseUsdc(body.amount);
     if (amount < MIN_SOLANA_DEPOSIT) throw new ApiError(422, `Minimum from Solana is ${formatUsdc(MIN_SOLANA_DEPOSIT)} USDC (bridge fees come off first).`);
