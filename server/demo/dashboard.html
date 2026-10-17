@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hyde live run</title>
+<style>
+  :root { --ink:#07080c; --panel:#10131b; --panel2:#161a24; --line:#242a38; --text:#eef0f6; --muted:#8a90a2;
+          --violet:#8b7cff; --violet2:#b9b0ff; --lime:#c6f36b; --red:#ff6363; --amber:#ffc861; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { width:1920px; height:1080px; overflow:hidden; background:radial-gradient(1200px 700px at 78% 0%, #171433 0%, rgba(7,8,12,0) 60%), var(--ink);
+         color:var(--text); font-family:Montserrat, "Segoe UI", sans-serif; }
+  .mono { font-family:"JetBrains Mono", ui-monospace, monospace; }
+  header { height:96px; display:flex; align-items:center; gap:24px; padding:0 48px; border-bottom:1px solid var(--line); }
+  .logo { font-size:40px; font-weight:900; letter-spacing:-0.04em; }
+  .logo span { color:var(--violet); }
+  .live { display:flex; align-items:center; gap:10px; padding:8px 16px; border-radius:999px; background:rgba(255,99,99,0.12); color:var(--red); font-weight:800; font-size:17px; letter-spacing:0.08em; }
+  .live i { width:10px; height:10px; border-radius:50%; background:var(--red); display:block; }
+  .netinfo { font-size:18px; color:var(--muted); }
+  .netinfo b { color:var(--text); }
+  .stepname { margin-left:auto; font-size:22px; font-weight:800; color:var(--violet2); }
+  main { display:grid; grid-template-columns: 820px 1fr; gap:28px; padding:28px 48px; height:calc(1080px - 96px - 150px); }
+  .col { background:var(--panel); border:1px solid var(--line); border-radius:24px; overflow:hidden; display:flex; flex-direction:column; }
+  .col h2 { font-size:17px; letter-spacing:0.16em; color:var(--muted); padding:18px 24px; border-bottom:1px solid var(--line); font-weight:800; }
+  .feed { padding:18px 22px; display:flex; flex-direction:column; gap:14px; overflow:hidden; justify-content:flex-end; flex:1; }
+  .msg-user { align-self:flex-end; max-width:600px; padding:16px 22px; border-radius:20px 20px 6px 20px; background:#2a2550; font-size:22px; line-height:1.4; }
+  .msg-ai { font-size:20px; line-height:1.45; color:#d9dce6; }
+  .tool { border:1px solid #2f2a55; background:#141127; border-radius:16px; padding:14px 18px; font-size:18px; }
+  .tool .h { font-weight:800; color:var(--violet2); font-size:16px; letter-spacing:0.04em; }
+  .tool .b { margin-top:6px; color:#cfd2de; line-height:1.45; white-space:pre-wrap; }
+  .tx { border:1px solid var(--line); background:var(--panel2); border-radius:14px; padding:14px 18px; font-size:17px; }
+  .tx .top { display:flex; justify-content:space-between; gap:12px; }
+  .tx .what { font-weight:800; font-size:19px; }
+  .tx .ok { color:var(--lime); font-weight:800; letter-spacing:0.06em; font-size:15px; }
+  .tx .hash { color:var(--muted); margin-top:6px; font-size:15px; }
+  .tx .ev { margin-top:6px; color:#cfd2de; font-size:16px; }
+  .tx.who-standin { border-color:#5a4a25; }
+  .tag { display:inline-block; padding:3px 10px; border-radius:999px; font-size:13px; font-weight:800; letter-spacing:0.06em; margin-right:8px; }
+  .tag.v { background:rgba(139,124,255,0.16); color:var(--violet2); }
+  .tag.a { background:rgba(255,200,97,0.14); color:var(--amber); }
+  .tag.l { background:rgba(198,243,107,0.14); color:var(--lime); }
+  footer { position:absolute; left:48px; right:48px; bottom:28px; height:110px; display:grid; grid-template-columns: repeat(4, 1fr); gap:22px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:16px 22px; }
+  .stat .l { font-size:14px; letter-spacing:0.14em; color:var(--muted); font-weight:800; }
+  .stat .v { margin-top:8px; font-size:34px; font-weight:900; }
+  .stat .v small { font-size:16px; color:var(--muted); font-weight:700; margin-left:6px; }
+  .stat.priv { border-color:#3a3360; background:linear-gradient(135deg, #1b1740, #10131b); }
+  .stat.priv .l { color:var(--violet2); }
+  #card { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(7,8,12,0.94); transition:opacity .5s; }
+  #card.hide { opacity:0; pointer-events:none; }
+  #card .big { font-size:120px; font-weight:900; letter-spacing:-0.05em; }
+  #card .big span { color:var(--violet); }
+  #card .sub { margin-top:24px; font-size:34px; font-weight:700; text-align:center; line-height:1.4; }
+  #card .sub2 { margin-top:18px; font-size:22px; color:var(--muted); text-align:center; max-width:1300px; line-height:1.5; }
+  .appear { animation: in .45s ease-out both; }
+  @keyframes in { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:none; } }
+  .spin { display:inline-block; width:16px; height:16px; border:3px solid #3a3360; border-top-color:var(--violet2); border-radius:50%; animation:r 0.8s linear infinite; vertical-align:-2px; margin-right:8px; }
+  @keyframes r { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Hyde<span>.</span></div>
+  <div class="live"><i></i>LIVE RUN</div>
+  <div class="netinfo">Base mainnet fork · block <b id="block">…</b> · real Veil, USDC, Circle and Hyde contracts · test funds</div>
+  <div class="stepname" id="step"></div>
+</header>
+<main>
+  <section class="col"><h2>AGENT · HYDE PLUGIN CALLS</h2><div class="feed" id="agent"></div></section>
+  <section class="col"><h2>BASE · LIVE TRANSACTIONS</h2><div class="feed" id="chain"></div></section>
+</main>
+<footer>
+  <div class="stat"><div class="l">DEMO WALLET · PUBLIC USDC</div><div class="v mono" id="pub">0.00</div></div>
+  <div class="stat"><div class="l">IN VEIL'S SCREENING QUEUE</div><div class="v mono" id="queue">0.00</div></div>
+  <div class="stat priv"><div class="l">PRIVATE BALANCE (HYDE)</div><div class="v mono" id="priv">0.00</div></div>
+  <div class="stat"><div class="l">ZK PROOFS VERIFIED ON-CHAIN</div><div class="v mono" id="proofs">0</div></div>
+</footer>
+<div id="card" class="hide"><div class="big">Hyde<span>.</span></div><div class="sub" id="cardsub"></div><div class="sub2" id="cardsub2"></div></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  function push(col, html) {
+    const el = document.createElement("div");
+    el.innerHTML = html; const node = el.firstElementChild; node.classList.add("appear");
+    const feed = $(col); feed.appendChild(node);
+    while (feed.scrollHeight > feed.clientHeight && feed.children.length > 1) feed.removeChild(feed.firstElementChild);
+    return node;
+  }
+  const short = (h) => h ? h.slice(0, 10) + "…" + h.slice(-6) : "";
+  const handlers = {
+    block: (e) => { $("block").textContent = Number(e.n).toLocaleString("en-US"); },
+    step: (e) => { $("step").textContent = e.text; },
+    card: (e) => { $("cardsub").innerHTML = e.title || ""; $("cardsub2").innerHTML = e.sub || ""; $("card").classList.toggle("hide", !e.show); },
+    user: (e) => push("agent", `<div class="msg-user">${esc(e.text)}</div>`),
+    ai: (e) => push("agent", `<div class="msg-ai">${e.html}</div>`),
+    tool: (e) => push("agent", `<div class="tool"><div class="h"><span class="tag v">HYDE</span>${esc(e.name)}</div><div class="b">${esc(e.body)}</div></div>`),
+    tx: (e) => push("chain", `<div class="tx ${e.standin ? "who-standin" : ""}"><div class="top"><span class="what">${e.standin ? '<span class="tag a">STAND-IN</span>' : ""}${esc(e.what)}</span><span class="ok">${esc(e.status || "CONFIRMED")}</span></div><div class="hash mono">tx ${short(e.hash)} · block ${e.block ?? ""}</div>${e.ev ? `<div class="ev">${e.ev}</div>` : ""}</div>`),
+    note: (e) => push("chain", `<div class="msg-ai"><span class="spin"></span>${esc(e.text)}</div>`),
+    stats: (e) => { for (const k of ["pub", "queue", "priv", "proofs"]) if (e[k] !== undefined) $(k).textContent = e[k]; },
+  };
+  const es = new EventSource("/events");
+  es.onmessage = (m) => { const e = JSON.parse(m.data); handlers[e.kind]?.(e); };
+</script>
+</body>
+</html>

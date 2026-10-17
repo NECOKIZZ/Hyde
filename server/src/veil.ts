@@ -94,7 +94,7 @@ export async function balances(kp: Keypair, owner?: Address): Promise<PrivateBal
 
 /** Private withdrawal (ZK proof + Veil relayer). The withdrawing wallet never appears on-chain. */
 export async function privateWithdraw(kp: Keypair, amount: bigint, recipient: Address): Promise<Hex> {
-  const r = await withdraw({ amount: formatUsdc(amount), recipient, keypair: kp, pool: "usdc", rpcUrl: BASE_RPC() });
+  const r = await withdraw({ amount: formatUsdc(amount), recipient, keypair: kp, pool: "usdc", rpcUrl: BASE_RPC(), relayUrl: process.env.VEIL_RELAY_URL });
   if (!r.success) throw new Error("Veil relay rejected the withdrawal");
   return r.transactionHash as Hex;
 }

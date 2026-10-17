@@ -1,0 +1,419 @@
+{
+ "pool": [
+  {
+   "name": "NewCommitment",
+   "type": "event",
+   "inputs": [
+    {
+     "name": "commitment",
+     "type": "bytes32",
+     "indexed": false,
+     "internalType": "bytes32"
+    },
+    {
+     "name": "index",
+     "type": "uint256",
+     "indexed": false,
+     "internalType": "uint256"
+    },
+    {
+     "name": "encryptedOutput",
+     "type": "bytes",
+     "indexed": false,
+     "internalType": "bytes"
+    }
+   ],
+   "anonymous": false
+  },
+  {
+   "name": "NewNullifier",
+   "type": "event",
+   "inputs": [
+    {
+     "name": "nullifier",
+     "type": "bytes32",
+     "indexed": false,
+     "internalType": "bytes32"
+    }
+   ],
+   "anonymous": false
+  },
+  {
+   "name": "USDCWithdrawal",
+   "type": "event",
+   "inputs": [
+    {
+     "name": "recipient",
+     "type": "address",
+     "indexed": true,
+     "internalType": "address"
+    },
+    {
+     "name": "amount",
+     "type": "uint256",
+     "indexed": false,
+     "internalType": "uint256"
+    }
+   ],
+   "anonymous": false
+  },
+  {
+   "name": "getCommitments",
+   "type": "function",
+   "inputs": [
+    {
+     "name": "startIndex",
+     "type": "uint256",
+     "internalType": "uint256"
+    },
+    {
+     "name": "endIndex",
+     "type": "uint256",
+     "internalType": "uint256"
+    }
+   ],
+   "outputs": [
+    {
+     "name": "",
+     "type": "bytes32[]",
+     "internalType": "bytes32[]"
+    }
+   ],
+   "stateMutability": "view"
+  },
+  {
+   "name": "nextIndex",
+   "type": "function",
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "",
+     "type": "uint32",
+     "internalType": "uint32"
+    }
+   ],
+   "stateMutability": "view"
+  },
+  {
+   "name": "transactUSDC",
+   "type": "function",
+   "inputs": [
+    {
+     "name": "_args",
+     "type": "tuple",
+     "components": [
+      {
+       "name": "proof",
+       "type": "bytes",
+       "internalType": "bytes"
+      },
+      {
+       "name": "root",
+       "type": "bytes32",
+       "internalType": "bytes32"
+      },
+      {
+       "name": "inputNullifiers",
+       "type": "bytes32[]",
+       "internalType": "bytes32[]"
+      },
+      {
+       "name": "outputCommitments",
+       "type": "bytes32[2]",
+       "internalType": "bytes32[2]"
+      },
+      {
+       "name": "publicAmount",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "extDataHash",
+       "type": "bytes32",
+       "internalType": "bytes32"
+      }
+     ],
+     "internalType": "struct VeilLib.Proof"
+    },
+    {
+     "name": "_extData",
+     "type": "tuple",
+     "components": [
+      {
+       "name": "recipient",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "extAmount",
+       "type": "int256",
+       "internalType": "int256"
+      },
+      {
+       "name": "relayer",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "fee",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "encryptedOutput1",
+       "type": "bytes",
+       "internalType": "bytes"
+      },
+      {
+       "name": "encryptedOutput2",
+       "type": "bytes",
+       "internalType": "bytes"
+      }
+     ],
+     "internalType": "struct VeilLib.ExtData"
+    }
+   ],
+   "outputs": [],
+   "stateMutability": "nonpayable"
+  },
+  {
+   "name": "withdrawUSDC",
+   "type": "function",
+   "inputs": [
+    {
+     "name": "_args",
+     "type": "tuple",
+     "components": [
+      {
+       "name": "proof",
+       "type": "bytes",
+       "internalType": "bytes"
+      },
+      {
+       "name": "root",
+       "type": "bytes32",
+       "internalType": "bytes32"
+      },
+      {
+       "name": "inputNullifiers",
+       "type": "bytes32[]",
+       "internalType": "bytes32[]"
+      },
+      {
+       "name": "outputCommitments",
+       "type": "bytes32[2]",
+       "internalType": "bytes32[2]"
+      },
+      {
+       "name": "publicAmount",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "extDataHash",
+       "type": "bytes32",
+       "internalType": "bytes32"
+      }
+     ],
+     "internalType": "struct VeilLib.Proof"
+    },
+    {
+     "name": "_extData",
+     "type": "tuple",
+     "components": [
+      {
+       "name": "recipient",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "extAmount",
+       "type": "int256",
+       "internalType": "int256"
+      },
+      {
+       "name": "relayer",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "fee",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "encryptedOutput1",
+       "type": "bytes",
+       "internalType": "bytes"
+      },
+      {
+       "name": "encryptedOutput2",
+       "type": "bytes",
+       "internalType": "bytes"
+      }
+     ],
+     "internalType": "struct VeilLib.ExtData"
+    }
+   ],
+   "outputs": [],
+   "stateMutability": "nonpayable"
+  }
+ ],
+ "queue": [
+  {
+   "name": "DepositAccepted",
+   "type": "event",
+   "inputs": [
+    {
+     "name": "nonce",
+     "type": "uint256",
+     "indexed": true,
+     "internalType": "uint256"
+    },
+    {
+     "name": "operator",
+     "type": "address",
+     "indexed": true,
+     "internalType": "address"
+    },
+    {
+     "name": "veilEntry",
+     "type": "address",
+     "indexed": true,
+     "internalType": "address"
+    },
+    {
+     "name": "amount",
+     "type": "uint256",
+     "indexed": false,
+     "internalType": "uint256"
+    }
+   ],
+   "anonymous": false
+  },
+  {
+   "name": "getDeposit",
+   "type": "function",
+   "inputs": [
+    {
+     "name": "_nonce",
+     "type": "uint256",
+     "internalType": "uint256"
+    }
+   ],
+   "outputs": [
+    {
+     "name": "deposit",
+     "type": "tuple",
+     "components": [
+      {
+       "name": "fallbackReceiver",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "amountIn",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "fee",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "shieldAmount",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "timestamp",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "status",
+       "type": "uint8",
+       "internalType": "enum VeilLib.DepositStatus"
+      },
+      {
+       "name": "depositKey",
+       "type": "bytes",
+       "internalType": "bytes"
+      }
+     ],
+     "internalType": "struct VeilLib.DepositQueue"
+    }
+   ],
+   "stateMutability": "view"
+  },
+  {
+   "name": "getPendingDeposits",
+   "type": "function",
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "nonces",
+     "type": "uint256[]",
+     "internalType": "uint256[]"
+    }
+   ],
+   "stateMutability": "view"
+  },
+  {
+   "name": "getPendingDepositsWithData",
+   "type": "function",
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "deposits",
+     "type": "tuple[]",
+     "components": [
+      {
+       "name": "nonce",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "fallbackReceiver",
+       "type": "address",
+       "internalType": "address"
+      },
+      {
+       "name": "amountIn",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "fee",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "shieldAmount",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "timestamp",
+       "type": "uint256",
+       "internalType": "uint256"
+      },
+      {
+       "name": "status",
+       "type": "uint8",
+       "internalType": "enum VeilLib.DepositStatus"
+      },
+      {
+       "name": "depositKey",
+       "type": "bytes",
+       "internalType": "bytes"
+      }
+     ],
+     "internalType": "struct VeilLib.DepositWithNonce[]"
+    }
+   ],
+   "stateMutability": "view"
+  }
+ ]
+}
