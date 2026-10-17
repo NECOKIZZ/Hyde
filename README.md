@@ -31,6 +31,19 @@ your PayBox wallet
                                  ZK withdrawal (Veil relay) ─► one-time ExitBox ─► CCTP ─► Circle delivers to Bob
 ```
 
+## Private payroll
+
+`hyde_payroll` is the business case. A company keeps its treasury in the vault and tells its agent
+*"run October payroll"*: up to 25 payees, each on the chain they prefer (Base, Arbitrum, Polygon, Solana…).
+
+- **Exact pay:** every payee receives exactly their salary; Hyde adds fees on top (e.g. 950.50 USDC to three
+  people on Base, Arbitrum and Solana costs at most ~0.47 USDC in fees).
+- **All or nothing on funding:** if the private balance can't cover the whole run, nobody is paid.
+- **Private:** outsiders can't link the payments to the company or to each other, so salaries and burn rate stay
+  off the public record. Each payment leaves through its own one-time ExitBox.
+- **No standing custody:** there is no auto-schedule, because that would mean storing the company's Veil key.
+  The agent keeps the payee list and runs payroll on request with a fresh signature.
+
 ## How it works
 
 - **Privacy:** the existing [Veil Cash](https://docs.veil.cash) USDC pool on Base (Tornado Nova fork,
@@ -64,6 +77,7 @@ your PayBox wallet
 | `hyde_deposit_solana` | Go private from Solana: returns the PayBox `request_swap` to run | Agent runs PayBox's bridge |
 | `hyde_balance` | Spendable / clearing / screening balances (poll while `computing`) | — |
 | `hyde_send` | Quote, then `confirm: true` to pay a recipient on any of the 7 chains | **none** |
+| `hyde_payroll` | Pay up to 25 people at once, each on any chain, each receiving their exact amount | **none** |
 | `hyde_status` | Track a send by `job_id` | — |
 
 Every call returns within PayBox's 10-second budget: slow work (pool scans, Groth16 proofs) runs on the

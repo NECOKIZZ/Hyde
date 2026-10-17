@@ -127,7 +127,8 @@ export function createServer() {
           "1. hyde_deposit (EVM chains) or hyde_deposit_solana moves public USDC into the user's private balance (Veil Cash pool on Base). First deposits clear compliance screening, typically ~15 minutes.",
           "2. hyde_balance shows the private balance.",
           "3. hyde_send pays anyone on any listed chain, Solana included, from the private balance. Quote first, then confirm. No wallet signature: the user's address never appears in the payment.",
-          "4. hyde_status tracks a send.",
+          "4. hyde_payroll pays up to 25 people at once, each on any chain, each receiving their exact amount.",
+          "5. hyde_status tracks sends, payroll runs and deposits.",
         ],
       };
       return { content: text(`Sign this exact message with the PayBox EVM wallet:\n\n${VEIL_MESSAGE}`), structuredContent: out };
@@ -298,11 +299,63 @@ export function createServer() {
     },
   );
 
+  const payee = z
+    .object({
+      to: z.string().regex(/^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/).describe("EVM address, or Solana wallet when to_chain is solana"),
+      to_chain: anyChain,
+      amount: usdc.describe("Exact USDC this payee receives; fees are added on top"),
+      label: z.string().max(64).optional().describe("Name or role, e.g. \"Ada (design)\""),
+      fallback_address: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional().describe("Solana payees only: EVM refund address on Base"),
+    })
+    .strict();
+  const payrollOutput = z
+    .object({
+      status: z.enum(["quote", "sending"]),
+      payees: z.number(),
+      salaries_usdc: z.string(),
+      fees_at_most_usdc: z.string(),
+      total_at_most_usdc: z.string(),
+      items: z.array(z.object({ label: z.string().optional(), to: z.string(), to_chain: z.string(), receives: z.string(), costs: z.string() }).strict()),
+      job_id: z.string().optional(),
+      next: z.string(),
+    })
+    .strict();
+
+  server.registerTool(
+    "hyde_payroll",
+    {
+      title: "Run private payroll",
+      description:
+        "Pays up to 25 people at once from the private balance, each on any supported chain (Solana included). Every payee " +
+        "receives exactly their amount; fees are added on top. Outsiders can't link the payments to the payer or to each other. " +
+        "Call without confirm to get the total and show it to the user; call again with confirm=true only after they approve. " +
+        "If the private balance can't cover the whole run, nobody is paid. No PayBox signature is needed.",
+      inputSchema: z
+        .object({
+          veil_signature: veilSignature,
+          payees: z.array(payee).min(1).max(25),
+          confirm: z.boolean().optional().describe("true only after the user approved the quote"),
+        })
+        .strict(),
+      outputSchema: payrollOutput,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      const { data } = await hyde("/v1/payroll", args);
+      const out = payrollOutput.parse(data);
+      const summary =
+        out.status === "quote"
+          ? `Payroll for ${out.payees} people: ${out.salaries_usdc} USDC in pay + up to ${out.fees_at_most_usdc} USDC fees = up to ${out.total_at_most_usdc} USDC from the private balance. Ask the user, then call with confirm=true.`
+          : `Payroll started (job ${out.job_id}). Each payee is paid in turn, about a minute each. Track with hyde_status.`;
+      return { content: text(summary), structuredContent: out };
+    },
+  );
+
   server.registerTool(
     "hyde_status",
     {
-      title: "Track a private send or deposit",
-      description: "Status of a Hyde job by job_id.",
+      title: "Track a private send, payroll or deposit",
+      description: "Status of a Hyde job by job_id (sends, payroll runs and deposits).",
       inputSchema: z.object({ job_id: z.string().uuid() }).strict(),
       outputSchema: jobOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },

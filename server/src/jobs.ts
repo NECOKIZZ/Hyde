@@ -45,7 +45,16 @@ export interface ExitJob extends JobBase {
   forwardTx?: string;
 }
 
-export type Job = ShieldJob | ExitJob;
+/** A batch of private sends. Each payee becomes its own ExitJob; this tracks the run. */
+export interface PayrollJob extends JobBase {
+  kind: "payroll";
+  status: "checking" | "sending" | "done" | "partial" | "failed";
+  /** USDC base units the whole run may spend, fees included */
+  total: string;
+  items: { label?: string; to: string; to_chain: string; receives: string; job_id?: string }[];
+}
+
+export type Job = ShieldJob | ExitJob | PayrollJob;
 
 const FILE = process.env.JOBS_FILE ?? "data/jobs.json";
 const SHIELD_TTL_MS = 6 * 3600_000;
@@ -58,6 +67,9 @@ export function loadJobs() {
       if (j.kind === "exit" && j.status === "proving") {
         j.status = "failed";
         j.error = "Server restarted before the private withdrawal was submitted. Nothing moved; send again.";
+      } else if (j.kind === "payroll" && ["checking", "sending"].includes(j.status)) {
+        j.status = "partial";
+        j.error = "Server restarted mid-run. Payees with a job_id were paid or are in flight; check them before re-running the rest.";
       }
       jobs.set(j.id, j);
     }
@@ -138,19 +150,52 @@ function runVeil<T>(op: Record<string, unknown>): Promise<T> {
   });
 }
 
+/** The ZK withdrawal for one send. Caller holds the user's lock. */
+async function withdrawFor(job: ExitJob, kp: Keypair) {
+  const { withdrawTx } = await runVeil<{ withdrawTx: Hex }>({
+    op: "send",
+    key: kp.privkey,
+    amount: job.amount,
+    // Base-only sends have no box, and their recipient is always an EVM address.
+    recipient: job.box ?? (job.recipient as Address),
+  });
+  if (job.box) update(job, { status: "awaiting_funds", withdrawTx }, `private withdrawal to exit box ${withdrawTx}`);
+  else update(job, { status: "done", withdrawTx }, `private withdrawal to recipient ${withdrawTx}`);
+}
+
 /** Runs the ZK withdrawal in the background. The key lives only in this closure and the worker. */
 export function startSend(job: ExitJob, kp: Keypair) {
+  void withUserLock(keyId(kp), () => withdrawFor(job, kp)).catch((err: Error) =>
+    update(job, { status: "failed", error: err.message }, `proof/withdraw failed: ${err.message}`),
+  );
+}
+
+/**
+ * Pays every payee in turn from the private balance. Checks the balance covers the whole run first,
+ * so a short balance pays nobody rather than half the team.
+ */
+export function startPayroll(run: PayrollJob, kp: Keypair, slot: InboxSlot, sends: Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">[]) {
   void withUserLock(keyId(kp), async () => {
-    const { withdrawTx } = await runVeil<{ withdrawTx: Hex }>({
-      op: "send",
-      key: kp.privkey,
-      amount: job.amount,
-      // Base-only sends have no box, and their recipient is always an EVM address.
-      recipient: job.box ?? (job.recipient as Address),
-    });
-    if (job.box) update(job, { status: "awaiting_funds", withdrawTx }, `private withdrawal to exit box ${withdrawTx}`);
-    else update(job, { status: "done", withdrawTx }, `private withdrawal to recipient ${withdrawTx}`);
-  }).catch((err: Error) => update(job, { status: "failed", error: err.message }, `proof/withdraw failed: ${err.message}`));
+    const bal = await runVeil<PrivateBalances>({ op: "balance", key: kp.privkey, slot });
+    const spendable = BigInt(Math.round(Number(bal.shielded) * 1e6)) + BigInt(Math.round(Number(bal.inbox) * 1e6));
+    if (spendable < BigInt(run.total)) {
+      throw new Error(`Private balance ${bal.shielded} USDC (+${bal.inbox} clearing) is below the payroll total of ${Number(run.total) / 1e6} USDC. Nobody was paid.`);
+    }
+    update(run, { status: "sending" }, `balance ${bal.shielded} USDC covers the run`);
+    let failures = 0;
+    for (const [i, template] of sends.entries()) {
+      const job = createJob<ExitJob>(template);
+      run.items[i].job_id = job.id;
+      update(run, {}, `paying ${run.items[i].label ?? run.items[i].to}`);
+      try {
+        await withdrawFor(job, kp);
+      } catch (err) {
+        failures++;
+        update(job, { status: "failed", error: (err as Error).message }, `proof/withdraw failed: ${(err as Error).message}`);
+      }
+    }
+    update(run, { status: failures === 0 ? "done" : failures === sends.length ? "failed" : "partial" }, `${sends.length - failures}/${sends.length} payments sent from the private balance`);
+  }).catch((err: Error) => update(run, { status: "failed", error: err.message }, err.message));
 }
 
 // Balance scans read the whole pool and can take longer than a plugin call, so they run in the
@@ -234,6 +279,7 @@ const errorCounts = new Map<string, number>();
 
 export async function tick() {
   for (const job of jobs.values()) {
+    if (job.kind === "payroll") continue; // driven by startPayroll; its sends are ExitJobs below
     const active = job.kind === "shield"
       ? ["awaiting_funds", "sweeping", "screening"].includes(job.status)
       : ["awaiting_funds", "opening", "bridging"].includes(job.status);

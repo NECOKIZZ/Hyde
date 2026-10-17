@@ -8,7 +8,7 @@ import { CHAIN_KEYS, chainInfo, type ChainKey } from "./chains.js";
 import { relayerAccount } from "./clients.js";
 import { evmRecipient, exitParams, predictExitBox } from "./exitbox.js";
 import { SOLANA, isSolanaAddress, toBytes32, usdcAccountExists, usdcTokenAccount } from "./solana.js";
-import { createJob, getJob, pendingShields, requestBalance, startSend, type ExitJob, type Job, type ShieldJob } from "./jobs.js";
+import { createJob, getJob, pendingShields, requestBalance, startPayroll, startSend, type ExitJob, type Job, type PayrollJob, type ShieldJob } from "./jobs.js";
 import { MIN_SHIELD_USDC, inboxSlot, keypairFrom } from "./veil.js";
 
 const chain = z.enum(CHAIN_KEYS);
@@ -27,6 +27,82 @@ function relayerFee(): bigint {
   return parseUsdc(process.env.RELAYER_FEE_USDC ?? "0.03");
 }
 
+const MAX_PAYEES = 25;
+const payeeSchema = z.object({ to: z.string(), to_chain: anyChain, amount: usdc, fallback_address: z.string().optional() });
+type Payee = z.infer<typeof payeeSchema>;
+type ExitTemplate = Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">;
+
+/**
+ * Resolves a payee to an exit job. exactOut: the recipient gets at least `amount` and fees are added on
+ * top (payroll); otherwise fees come out of `amount` (single sends).
+ */
+async function prepareExit(p: Payee, opts: { exactOut: boolean }): Promise<{ quote: Record<string, string>; job: ExitTemplate; spend: bigint }> {
+  const amount = parseUsdc(p.amount);
+  if (amount === 0n) throw new ApiError(422, "Amount must be above 0.");
+  const to = p.to_chain;
+  let recipient: string;
+  let target: ReturnType<typeof evmRecipient>;
+  if (to === "solana") {
+    if (!isSolanaAddress(p.to)) throw new ApiError(400, "to must be a Solana wallet address");
+    if (!p.fallback_address || !isAddress(p.fallback_address)) {
+      throw new ApiError(400, "Sending to Solana needs fallback_address: an EVM address that receives the USDC on Base if the bridge reverts.");
+    }
+    if (!(await usdcAccountExists(p.to))) {
+      throw new ApiError(422, "The recipient has no USDC account on Solana yet. Ask them to receive any USDC once first (CCTP can only mint into an existing account).");
+    }
+    recipient = p.to;
+    target = { destinationDomain: SOLANA.domain, mintRecipient: toBytes32(usdcTokenAccount(p.to)), fallbackRecipient: getAddress(p.fallback_address) };
+  } else {
+    if (!isAddress(p.to)) throw new ApiError(400, "to must be an EVM address");
+    recipient = getAddress(p.to);
+    target = evmRecipient(to, recipient as `0x${string}`);
+  }
+
+  if (to === "base") {
+    return {
+      quote: { route: "Veil pool → recipient on Base", you_spend: p.amount, recipient_receives: p.amount },
+      job: { kind: "exit", status: "proving", to, recipient, amount: amount.toString() },
+      spend: amount,
+    };
+  }
+
+  const fee = relayerFee();
+  const fees = await quoteFees(BASE_DOMAIN, target.destinationDomain);
+  let maxFee: bigint;
+  let spend: bigint;
+  if (opts.exactOut) {
+    // Size the cap on the grossed-up amount so the recipient still nets `amount`.
+    maxFee = maxFeeFor(amount + maxFeeFor(amount, fees), fees);
+    spend = amount + maxFee + fee;
+  } else {
+    maxFee = maxFeeFor(amount - fee, fees);
+    if (amount <= fee + maxFee) throw new ApiError(422, `Too small: fees are up to ${formatUsdc(fee + maxFee)} USDC.`);
+    spend = amount;
+  }
+  const params = exitParams({ ...target, maxFee, relayer: relayerAccount().address, relayerFee: fee });
+  const salt = toHex(randomBytes(32));
+  return {
+    quote: {
+      route: `Veil pool (Base) → one-time exit box → Circle CCTP → ${to === "solana" ? SOLANA.name : chainInfo(to).name}`,
+      you_spend: formatUsdc(spend),
+      relayer_fee: formatUsdc(fee),
+      bridge_fee_at_most: formatUsdc(maxFee),
+      recipient_receives_at_least: formatUsdc(spend - fee - maxFee),
+    },
+    job: {
+      kind: "exit",
+      status: "proving",
+      to,
+      recipient,
+      amount: spend.toString(),
+      params: { ...params, maxFee: maxFee.toString(), relayerFee: fee.toString() },
+      salt,
+      box: predictExitBox(params, salt),
+    },
+    spend,
+  };
+}
+
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -41,6 +117,16 @@ function jobView(job: Job) {
   const base = { job_id: job.id, kind: job.kind, status: job.status, updated_at: job.updatedAt, error: job.error, log: job.log.slice(-5) };
   if (job.kind === "shield") {
     return { ...base, from_chain: job.src, amount_usdc: formatUsdc(BigInt(job.amount)), inbox: job.slot.forwarderAddress, sweep_tx: job.sweepTx };
+  }
+  if (job.kind === "payroll") {
+    return {
+      ...base,
+      total_at_most_usdc: formatUsdc(BigInt(job.total)),
+      payees: job.items.map((item) => {
+        const send = item.job_id ? getJob(item.job_id) : undefined;
+        return { ...item, status: send?.status ?? "queued", error: send?.error, delivery_tx: send?.kind === "exit" ? send.forwardTx ?? send.withdrawTx : undefined };
+      }),
+    };
   }
   return {
     ...base,
@@ -184,64 +270,51 @@ export function buildApi() {
   }));
 
   api.post("/send", route(async (req) => {
-    const body = auth
-      .and(z.object({ to: z.string(), to_chain: anyChain, amount: usdc, fallback_address: z.string().optional(), confirm: z.boolean().optional() }))
-      .parse(req.body);
-    const amount = parseUsdc(body.amount);
-    const to = body.to_chain;
-    let recipient: string;
-    let target: ReturnType<typeof evmRecipient>;
-    if (to === "solana") {
-      if (!isSolanaAddress(body.to)) throw new ApiError(400, "to must be a Solana wallet address");
-      if (!body.fallback_address || !isAddress(body.fallback_address)) {
-        throw new ApiError(400, "Sending to Solana needs fallback_address: an EVM address that receives the USDC on Base if the bridge reverts.");
-      }
-      if (!(await usdcAccountExists(body.to))) {
-        throw new ApiError(422, "The recipient has no USDC account on Solana yet. Ask them to receive any USDC once first (CCTP can only mint into an existing account).");
-      }
-      recipient = body.to;
-      target = { destinationDomain: SOLANA.domain, mintRecipient: toBytes32(usdcTokenAccount(body.to)), fallbackRecipient: getAddress(body.fallback_address) };
-    } else {
-      if (!isAddress(body.to)) throw new ApiError(400, "to must be an EVM address");
-      recipient = getAddress(body.to);
-      target = evmRecipient(to, recipient as `0x${string}`);
-    }
-
-    let quote: Record<string, string>;
-    let job: Omit<ExitJob, "id" | "createdAt" | "updatedAt" | "log">;
-    if (to === "base") {
-      quote = { route: "Veil pool → recipient on Base", you_spend: body.amount, recipient_receives: body.amount };
-      job = { kind: "exit", status: "proving", to, recipient, amount: amount.toString() };
-    } else {
-      const fee = relayerFee();
-      const maxFee = maxFeeFor(amount - fee, await quoteFees(BASE_DOMAIN, target.destinationDomain));
-      if (amount <= fee + maxFee) throw new ApiError(422, `Too small: fees are up to ${formatUsdc(fee + maxFee)} USDC.`);
-      const params = exitParams({ ...target, maxFee, relayer: relayerAccount().address, relayerFee: fee });
-      const salt = toHex(randomBytes(32));
-      quote = {
-        route: `Veil pool (Base) → one-time exit box → Circle CCTP → ${to === "solana" ? SOLANA.name : chainInfo(to).name}`,
-        you_spend: body.amount,
-        relayer_fee: formatUsdc(fee),
-        bridge_fee_at_most: formatUsdc(maxFee),
-        recipient_receives_at_least: formatUsdc(amount - fee - maxFee),
-      };
-      job = {
-        kind: "exit",
-        status: "proving",
-        to,
-        recipient,
-        amount: amount.toString(),
-        params: { ...params, maxFee: maxFee.toString(), relayerFee: fee.toString() },
-        salt,
-        box: predictExitBox(params, salt),
-      };
-    }
-    if (!body.confirm) return { body: { status: "quote", ...quote, next: "Show this to the user; call again with confirm=true to send." } };
+    const body = auth.and(payeeSchema).and(z.object({ confirm: z.boolean().optional() })).parse(req.body);
+    const prepared = await prepareExit(body, { exactOut: false });
+    if (!body.confirm) return { body: { status: "quote", ...prepared.quote, next: "Show this to the user; call again with confirm=true to send." } };
 
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
-    const created = createJob<ExitJob>(job);
+    const created = createJob<ExitJob>(prepared.job);
     startSend(created, kp);
-    return { status: 202, body: { status: "sending", job_id: created.id, ...quote, next: "Poll the job; delivery usually takes 1–3 minutes." } };
+    return { status: 202, body: { status: "sending", job_id: created.id, ...prepared.quote, next: "Poll the job; delivery usually takes 1–3 minutes." } };
+  }));
+
+  // Payroll: every payee receives exactly their amount; fees are added on top. Nothing is sent unless
+  // the private balance covers the whole run.
+  api.post("/payroll", route(async (req) => {
+    const body = auth
+      .and(z.object({ payees: z.array(payeeSchema.and(z.object({ label: z.string().max(64).optional() }))).min(1).max(MAX_PAYEES), confirm: z.boolean().optional() }))
+      .parse(req.body);
+    const prepared = [];
+    for (const [i, payee] of body.payees.entries()) {
+      try {
+        prepared.push({ payee, ...(await prepareExit(payee, { exactOut: true })) });
+      } catch (err) {
+        throw new ApiError(err instanceof ApiError ? err.status : 422, `Payee ${i + 1}${payee.label ? ` (${payee.label})` : ""}: ${(err as Error).message}`);
+      }
+    }
+    const total = prepared.reduce((sum, p) => sum + p.spend, 0n);
+    const salaries = prepared.reduce((sum, p) => sum + parseUsdc(p.payee.amount), 0n);
+    const summary = {
+      payees: prepared.length,
+      salaries_usdc: formatUsdc(salaries),
+      fees_at_most_usdc: formatUsdc(total - salaries),
+      total_at_most_usdc: formatUsdc(total),
+      items: prepared.map((p) => ({ label: p.payee.label, to: p.payee.to, to_chain: p.payee.to_chain, receives: p.payee.amount, costs: formatUsdc(p.spend) })),
+    };
+    if (!body.confirm) return { body: { status: "quote", ...summary, next: "Show this to the user; call again with confirm=true to pay everyone." } };
+
+    const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
+    const slot = await inboxSlot(kp);
+    const run = createJob<PayrollJob>({
+      kind: "payroll",
+      status: "checking",
+      total: total.toString(),
+      items: prepared.map((p) => ({ label: p.payee.label, to: p.payee.to, to_chain: p.payee.to_chain, receives: p.payee.amount })),
+    });
+    startPayroll(run, kp, slot, prepared.map((p) => p.job));
+    return { status: 202, body: { status: "sending", job_id: run.id, ...summary, next: "Poll the job with hyde_status; each payee is paid in turn (about a minute each)." } };
   }));
 
   api.get("/jobs/:id", route(async (req) => {

@@ -73,7 +73,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     const ms = Date.now() - started;
     assert.ok(ms < 10_000, `${name} took ${ms}ms (PayBox limit is 10s)`);
     if (msg.error) throw new Error(`${name}: JSON-RPC error ${JSON.stringify(msg.error)}`);
-    console.log(`  ${name} ${JSON.stringify(args.step ?? args.confirm ?? args.hide_timing ?? "")} → ${msg.result.isError ? "isError" : "ok"} in ${ms}ms`);
+    console.log(`  ${name} ${JSON.stringify(args.step ?? args.confirm ?? args.hide_timing ?? (Array.isArray(args.payees) ? `${args.payees.length} payees` : ""))} → ${msg.result.isError ? `isError (${String(msg.result.content?.[0]?.text).slice(0, 90)})` : "ok"} in ${ms}ms`);
     return msg.result;
   }
   throw new Error(`${name}: plugin exited without a response`);
@@ -168,6 +168,39 @@ try {
   assert.ok(Number(solQuote.structuredContent.recipient_receives_at_least) > 19.6);
   assert.equal((await callTool("hyde_send", { veil_signature, to: SOL_WITH_USDC, to_chain: "solana", amount: "20" })).isError, true);
   assert.equal((await callTool("hyde_send", { veil_signature, to: "Bt9oNR5cCtnfuMmXgWELd6q5i974PdEMQDUE55nBC57L", to_chain: "solana", amount: "20", fallback_address: wallet.address })).isError, true);
+
+  // Payroll across chains: each payee nets their exact amount; fees are added on top.
+  const payees = [
+    { label: "Ada (design)", to: "0x000000000000000000000000000000000000bEEF", to_chain: "base", amount: "300" },
+    { label: "Tunde (eng)", to: "0x000000000000000000000000000000000000cafe", to_chain: "arbitrum", amount: "450.5" },
+    { label: "Chidi (ops)", to: SOL_WITH_USDC, to_chain: "solana", amount: "200", fallback_address: wallet.address },
+  ];
+  const payQuote = (await callTool("hyde_payroll", { veil_signature, payees })).structuredContent;
+  assert.equal(payQuote.status, "quote");
+  assert.equal(payQuote.payees, 3);
+  assert.equal(payQuote.salaries_usdc, "950.5");
+  for (const item of payQuote.items) assert.ok(Number(item.costs) >= Number(item.receives), "fees are on top");
+  assert.equal(payQuote.items[0].costs, "300", "Base payees cost exactly their pay");
+  const sumCosts = payQuote.items.reduce((t: number, i: any) => t + Number(i.costs), 0);
+  assert.ok(Math.abs(sumCosts - Number(payQuote.total_at_most_usdc)) < 1e-6);
+  console.log(`  payroll quote: ${payQuote.salaries_usdc} pay + ${payQuote.fees_at_most_usdc} fees = ${payQuote.total_at_most_usdc}`);
+
+  const badPayee = await callTool("hyde_payroll", { veil_signature, payees: [payees[0], { ...payees[2], fallback_address: undefined }] });
+  assert.equal(badPayee.isError, true);
+  assert.match(badPayee.content[0].text, /Payee 2/);
+
+  const run = await callTool("hyde_payroll", { veil_signature, payees, confirm: true });
+  assert.equal(run.structuredContent.status, "sending");
+  let runStatus;
+  for (let i = 0; i < 30; i++) {
+    runStatus = (await callTool("hyde_status", { job_id: run.structuredContent.job_id })).structuredContent;
+    if (["failed", "done", "partial"].includes(runStatus.status)) break;
+    await sleep(3000);
+  }
+  assert.equal(runStatus.status, "failed");
+  assert.match(runStatus.error, /Nobody was paid/);
+  assert.ok(runStatus.payees.every((p: any) => p.status === "queued" && !p.job_id), "no payee was attempted");
+  console.log(`  short balance stopped payroll safely: ${runStatus.error}`);
 
   const quote = await callTool("hyde_send", { veil_signature, to: "0x000000000000000000000000000000000000bEEF", to_chain: "arbitrum", amount: "20" });
   assert.equal(quote.structuredContent.status, "quote");
