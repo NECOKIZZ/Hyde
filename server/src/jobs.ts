@@ -127,7 +127,8 @@ export function withUserLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
 }
 
 const RUNNER = new URL("./veil-runner.ts", import.meta.url).pathname;
-const RUNNER_TIMEOUT_MS = 180_000;
+// Render's free plan has a fraction of a CPU: pool scans and proofs are slow there.
+const RUNNER_TIMEOUT_MS = 600_000;
 
 /** Runs CPU-heavy Veil work in a child process; the key is passed over stdin only. */
 function runVeil<T>(op: Record<string, unknown>): Promise<T> {

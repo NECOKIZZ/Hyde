@@ -6,7 +6,7 @@ import { z } from "zod";
 import { approveCall, burnCall, formatUsdc, maxFeeFor, parseUsdc, quoteFees, transferCall, type UnsignedCall } from "./cctp.js";
 import { CHAIN_KEYS, chainInfo, type ChainKey } from "./chains.js";
 import { relayerAccount } from "./clients.js";
-import { evmRecipient, exitParams, predictExitBox } from "./exitbox.js";
+import { evmRecipient, exitParams, predictExitBox, usdcBalanceOnBase } from "./exitbox.js";
 import { SOLANA, isSolanaAddress, toBytes32, usdcAccountExists, usdcTokenAccount } from "./solana.js";
 import { createJob, getJob, pendingShields, requestBalance, startPayroll, startSend, type ExitJob, type Job, type PayrollJob, type ShieldJob } from "./jobs.js";
 import { MIN_SHIELD_USDC, inboxSlot, keypairFrom } from "./veil.js";
@@ -254,6 +254,12 @@ export function buildApi() {
     const body = auth.parse(req.body);
     const kp = keypairFrom({ veil_signature: body.veil_signature as Hex | undefined, veil_key: body.veil_key as Hex | undefined });
     const slot = await inboxSlot(kp);
+    // A deposit whose job was lost (e.g. a restart wiped the job file) still sits in the inbox:
+    // track it again so the worker sweeps it.
+    if (pendingShields(slot.forwarderAddress).length === 0) {
+      const held = await usdcBalanceOnBase(slot.forwarderAddress).catch(() => 0n);
+      if (held >= MIN_SHIELD_USDC) createJob<ShieldJob>({ kind: "shield", status: "sweeping", src: "base", amount: held.toString(), slot });
+    }
     const entry = requestBalance(kp, slot);
     const deposits = pendingShields(slot.forwarderAddress).map(jobView);
     if (entry.error) throw new ApiError(502, `Balance scan failed: ${entry.error}`);
