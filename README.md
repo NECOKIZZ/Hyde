@@ -2,9 +2,12 @@
 
 **Private USDC payments for PayBox agents, from and to any major chain.**
 
-PayBox gives an agent scoped, passkey-approved access to your wallet. Hyde gives that wallet a private
-balance: go private once from Ethereum, Arbitrum, Optimism, Polygon, Avalanche or Base, then pay anyone on
-any of those chains without your address appearing in the payment.
+PayBox gives an agent scoped, passkey-approved access to your wallet. Hyde adds private payments, on two rails:
+
+| Rail | Speed | Hides | How |
+|---|---|---|---|
+| **Instant** (Solana) | One approval, settles in seconds | The link between sender and recipient | [MagicBlock Private Payments](https://docs.magicblock.gg/pages/ephemeral-spl-token/private-payments.md): the transfer is queued through a TEE-backed private rollup, optionally with a random 1–10 min delay |
+| **Vault** (Ethereum, Arbitrum, OP, Polygon, Avalanche, Base) | Go private once (~15 min first-time screening), then send in minutes | Sender, recipient link and balance | Veil Cash shielded pool on Base + Circle CCTP in and out |
 
 > "Pay 50 USDC to 0xBob… on Arbitrum, privately." The agent quotes it, you agree, and Bob is paid by a
 > one-time contract that bridged out of a shielded pool. Nothing on-chain connects Bob to you.
@@ -44,7 +47,8 @@ your PayBox wallet
 
 | Tool | Does | Wallet action |
 |---|---|---|
-| `hyde_setup` | Explains the flow and returns the message to sign | — |
+| `hyde_setup` | Explains both rails and returns the message to sign (Vault only) | — |
+| `hyde_instant_send` | Private USDC payment to a Solana address right now (MagicBlock) | Solana proposal |
 | `hyde_deposit` | Go private. Base: one USDC transfer. Other chains: `step: approve`, then `step: bridge` | EVM proposal each step |
 | `hyde_balance` | Spendable / clearing / screening balances (poll while `computing`) | — |
 | `hyde_send` | Quote, then `confirm: true` to pay a recipient on any supported chain | **none** |
@@ -74,11 +78,14 @@ npm run test:e2e   # bundled plugin.mjs, fresh process per call → broker proxy
 2. **Hyde API:** deploy `server/` (Dockerfile, or `render.yaml` blueprint) with `HYDE_API_KEY` (random, 16+
    chars), `RELAYER_PRIVATE_KEY` (hot wallet with ~$2–3 of ETH on Base), `EXIT_BOX_FACTORY`, optional `BASE_RPC_URL`.
 3. **PayBox developer portal:** upload `plugin/dist/plugin.mjs`, then in **Test & configure**:
-   - Network host: your API hostname (e.g. `hyde-api.onrender.com`)
+   - Network hosts: `payments.magicblock.app` (Instant) and your API hostname (e.g. `hyde-api.onrender.com`)
    - Environment variable: `HYDE_API_URL=https://hyde-api.onrender.com`
    - Secret: host = your API hostname, header `x-hyde-key`, value = `HYDE_API_KEY`
 
 ## Privacy limits
+
+- **Instant** reduces linkability; it does not hide amounts, and network-level timing analysis is possible.
+  Use `hide_timing` for a random settlement delay. The sender needs a little SOL for fees and one-time rent.
 
 - **Amount and timing correlation.** Going private with 100 and sending 100 a minute later is linkable.
   Go private once, spend later, prefer round amounts.

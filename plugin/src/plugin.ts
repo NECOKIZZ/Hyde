@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
-import { evmOutputSchema, proposeEvm } from "./paybox.js";
+import { atomicAmount, evmOutputSchema, proposeEvm, proposeSolana, solanaOutputSchema } from "./paybox.js";
 
 const PROTOCOL_VERSION = "2026-07-28";
 
@@ -17,6 +17,36 @@ const veilSignature = z
   .describe("Signature of the Veil message (see hyde_setup) from the user's PayBox EVM wallet via request_wallet_sign. Never stored.");
 const chain = z.enum(CHAINS);
 const usdc = z.string().regex(/^\d+(\.\d{1,6})?$/, 'USDC amount such as "25" or "25.5"');
+
+const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const MAGICBLOCK_API = "https://payments.magicblock.app";
+const solanaAddress = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, "Solana base58 public key");
+
+/** MagicBlock Private Payments: builds an unsigned private transfer for the sender's wallet. No API key. */
+async function magicblockPrivateTransfer(input: { from: string; to: string; amount: string; hideTiming: boolean }) {
+  const res = await fetch(`${MAGICBLOCK_API}/v1/spl/transfer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      from: input.from,
+      to: input.to,
+      mint: SOLANA_USDC,
+      amount: Number(input.amount),
+      visibility: "private",
+      fromBalance: "base",
+      toBalance: "base",
+      // Optional settlement delay between 1 and 10 minutes, so arrival time doesn't reveal the sender.
+      ...(input.hideTiming ? { minDelayMs: "60000", maxDelayMs: "600000" } : {}),
+    }),
+    signal: AbortSignal.timeout(7000),
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`MagicBlock: ${data?.error?.message ?? data?.message ?? data?.error ?? res.status}`);
+  if (data.sendTo !== "base" || data.requiredSigners?.length !== 1 || data.requiredSigners[0] !== input.from) {
+    throw new Error("MagicBlock returned a transaction PayBox cannot sign (unexpected signers or route).");
+  }
+  return data as { transactionBase64: string; fees: { lamports: string; tokens: string } };
+}
 
 /** The Hyde API runs ZK proofs and the relay; PayBox injects its x-hyde-key header as a brokered secret. */
 async function hyde(path: string, body?: unknown): Promise<{ status: number; data: any }> {
@@ -91,6 +121,8 @@ export function createServer() {
           "Call PayBox request_wallet_sign with the user's EVM wallet and a personal (EIP-191) message intent over message_to_sign, exactly as written. Use the returned signature as veil_signature.",
         chains: [...CHAINS],
         flow: [
+          "Instant (Solana): hyde_instant_send pays a Solana address privately from the user's Solana USDC in one approval. No deposit, no waiting; MagicBlock's private rollup breaks the link between sender and recipient. No signature from setup is needed.",
+          "Vault (any chain, strongest privacy):",
           "1. hyde_deposit moves public USDC from any listed chain into the user's private balance (Veil Cash pool on Base). First deposits clear compliance screening, typically ~15 minutes.",
           "2. hyde_balance shows the private balance.",
           "3. hyde_send pays anyone on any listed chain from the private balance. Quote first, then confirm. No wallet signature: the user's address never appears in the payment.",
@@ -98,6 +130,43 @@ export function createServer() {
         ],
       };
       return { content: text(`Sign this exact message with the PayBox EVM wallet:\n\n${VEIL_MESSAGE}`), structuredContent: out };
+    },
+  );
+
+  server.registerTool(
+    "hyde_instant_send",
+    {
+      title: "Send privately now (Solana)",
+      description:
+        "Pays a Solana address in USDC privately, in one approval, with no deposit or waiting. The transfer routes through " +
+        "MagicBlock's private rollup so the payment can't be linked from sender to recipient on-chain. " +
+        "Set hide_timing to delay settlement by a random 1-10 minutes for stronger privacy. Fee: 0.1% in USDC, plus ~0.002 SOL account rent the first time. " +
+        "Pass the user's Solana wallet address as sender.",
+      inputSchema: z
+        .object({
+          sender: solanaAddress.describe("The user's PayBox Solana wallet address (public key)"),
+          to: solanaAddress.describe("Recipient Solana wallet address"),
+          amount: usdc.describe("USDC to send"),
+          hide_timing: z.boolean().optional().describe("Delay settlement 1-10 minutes at random"),
+        })
+        .strict(),
+      outputSchema: solanaOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ sender, to, amount, hide_timing }) => {
+      if (sender === to) throw new Error("Sender and recipient are the same wallet.");
+      const atomic = atomicAmount(amount, 6);
+      if (BigInt(atomic) <= 0n) throw new Error("Amount must be above 0.");
+      const tx = await magicblockPrivateTransfer({ from: sender, to, amount: atomic, hideTiming: hide_timing ?? false });
+      const fee = Number(tx.fees.tokens) / 1e6;
+      const result = proposeSolana({ transactionBase64: tx.transactionBase64 });
+      const lines = [
+        `Private transfer of ${amount} USDC on Solana to ${to}.`,
+        `Privacy fee: ${fee} USDC${Number(tx.fees.lamports) > 0 ? `, plus ~${Number(tx.fees.lamports) / 1e9} SOL one-time account rent` : ""}.`,
+        hide_timing ? "Settles privately after a random 1–10 minute delay." : "Settles privately within seconds of confirmation.",
+        "Nothing has been signed: PayBox will show the transaction for approval.",
+      ];
+      return { ...result, content: text(lines.join("\n")) };
     },
   );
 

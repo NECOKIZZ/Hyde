@@ -48,7 +48,7 @@ function startBroker(): http.Server {
 
 async function callTool(name: string, args: Record<string, unknown>) {
   const started = Date.now();
-  const child = spawn(NODE24, [PLUGIN], { env: { PATH: process.env.PATH, HYDE_API_URL: `http://127.0.0.1:${BROKER_PORT}` }, stdio: ["pipe", "pipe", "inherit"] });
+  const child = spawn(NODE24, [PLUGIN], { env: { ...process.env, HYDE_API_URL: `http://127.0.0.1:${BROKER_PORT}` }, stdio: ["pipe", "pipe", "inherit"] });
   const lines = createInterface({ input: child.stdout! });
   child.stdin!.write(
     JSON.stringify({
@@ -73,7 +73,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     const ms = Date.now() - started;
     assert.ok(ms < 10_000, `${name} took ${ms}ms (PayBox limit is 10s)`);
     if (msg.error) throw new Error(`${name}: JSON-RPC error ${JSON.stringify(msg.error)}`);
-    console.log(`  ${name} ${JSON.stringify(args.step ?? args.confirm ?? "")} → ${msg.result.isError ? "isError" : "ok"} in ${ms}ms`);
+    console.log(`  ${name} ${JSON.stringify(args.step ?? args.confirm ?? args.hide_timing ?? "")} → ${msg.result.isError ? "isError" : "ok"} in ${ms}ms`);
     return msg.result;
   }
   throw new Error(`${name}: plugin exited without a response`);
@@ -96,6 +96,22 @@ try {
 
   const setup = await callTool("hyde_setup", {});
   assert.equal(setup.structuredContent.message_to_sign, VEIL_SIGNED_MESSAGE);
+
+  // Hyde Instant: MagicBlock private transfer on Solana, one PayBox proposal, no backend.
+  const SENDER = "3rXKwQ1kpjBd5tdcco32qsvqUh1BnZjcYnS5kYrP7AYE";
+  const RECIPIENT = "Bt9oNR5cCtnfuMmXgWELd6q5i974PdEMQDUE55nBC57L";
+  for (const hide_timing of [false, true]) {
+    const instant = proposal(await callTool("hyde_instant_send", { sender: SENDER, to: RECIPIENT, amount: "2.5", hide_timing }));
+    assert.equal(instant.kind, "solana");
+    assert.equal(instant.chain, "solana:mainnet");
+    const raw = Buffer.from(instant.transaction.transactionBase64, "base64");
+    assert.ok(raw.length <= 1232, "fits a Solana packet");
+    assert.equal(raw[0], 1, "one signature slot");
+    assert.ok(raw.subarray(1, 65).every((b) => b === 0), "unsigned");
+    assert.equal(raw[66], 1, "exactly one required signer (the sender, also fee payer)");
+  }
+  assert.equal((await callTool("hyde_instant_send", { sender: SENDER, to: SENDER, amount: "1" })).isError, true);
+  assert.equal((await callTool("hyde_instant_send", { sender: "not-a-key", to: RECIPIENT, amount: "1" })).isError, true);
 
   const fromBase = await callTool("hyde_deposit", { veil_signature, from_chain: "base", amount: "25" });
   const p1 = proposal(fromBase);
