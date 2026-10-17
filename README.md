@@ -110,7 +110,9 @@ wiring and that the API's offline box prediction matches the chain.
 ## Deploy
 
 1. **Contracts** (already deployed above): `cd contracts && DEPLOYER_PRIVATE_KEY=0x… npm run deploy -- --network base` → `EXIT_BOX_FACTORY`.
-2. **Hyde API:** deploy `server/` (Dockerfile, or `render.yaml` blueprint) with `HYDE_API_KEY` (random, 16+
+2. **Hyde API:** deploy `server/` (Dockerfile, or the `render.yaml` blueprint, which fits Render's free plan:
+   the API pings its own public URL every 10 minutes so the job worker never sleeps; add a free external
+   pinger such as cron-job.org on `/health` as a backup) with `HYDE_API_KEY` (random, 16+
    chars), `RELAYER_PRIVATE_KEY` (hot wallet with ~$2–3 of ETH on Base), `EXIT_BOX_FACTORY`, optional `BASE_RPC_URL`.
 3. **PayBox developer portal:** upload `plugin/dist/plugin.mjs`, then in **Test & configure**:
    - Network hosts: `payments.magicblock.app` (Instant) and your API hostname (e.g. `hyde-api.onrender.com`)

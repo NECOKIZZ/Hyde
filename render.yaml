@@ -1,15 +1,14 @@
-# Render blueprint for the Hyde API (the PayBox plugin's backend).
+# Render blueprint for the Hyde API (the PayBox plugin's backend). Fits the free plan:
+# the API pings its own RENDER_EXTERNAL_URL every 10 minutes so the job worker never sleeps.
+# Free instances have no persistent disk: job records reset on redeploy, private balances don't
+# (they live on-chain in Veil's pool).
 services:
   - type: web
     name: hyde-api
     runtime: docker
     rootDir: server
-    plan: starter
+    plan: free
     healthCheckPath: /health
-    disk:
-      name: hyde-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: HYDE_API_KEY
         generateValue: true
@@ -19,5 +18,7 @@ services:
         value: "0x5f0b5c773e04bb1173d7ea8e174442f4f22d53a7"
       - key: RELAYER_FEE_USDC
         value: "0.03"
+      - key: JOBS_FILE
+        value: /tmp/hyde/jobs.json
       - key: BASE_RPC_URL
         sync: false
