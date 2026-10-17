@@ -166,9 +166,12 @@ async function withdrawFor(job: ExitJob, kp: Keypair) {
 
 /** Runs the ZK withdrawal in the background. The key lives only in this closure and the worker. */
 export function startSend(job: ExitJob, kp: Keypair) {
-  void withUserLock(keyId(kp), () => withdrawFor(job, kp)).catch((err: Error) =>
-    update(job, { status: "failed", error: err.message }, `proof/withdraw failed: ${err.message}`),
-  );
+  void withUserLock(keyId(kp), () => withdrawFor(job, kp)).catch((err: Error) => {
+    const error = /no unspent utxos|insufficient/i.test(err.message)
+      ? "The private balance can't cover this. Nothing moved: deposit with hyde_deposit, wait until hyde_balance shows it spendable, then send again."
+      : err.message;
+    update(job, { status: "failed", error }, `proof/withdraw failed: ${err.message}`);
+  });
 }
 
 /**

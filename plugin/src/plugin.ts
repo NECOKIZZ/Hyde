@@ -109,8 +109,12 @@ export function createServer() {
     {
       title: "Set up private payments",
       description:
-        "Start here. Explains how Hyde works and returns the exact message the user's PayBox EVM wallet must sign. " +
-        "Pass that signature as veil_signature to every other Hyde tool.",
+        "Start here for any private payment. Pick the rail: (A) recipient is a Solana wallet and the user holds Solana USDC -> " +
+        "hyde_instant_send, no setup or signature needed. (B) anything else -> Vault: 1) sign message_to_sign once with the PayBox EVM " +
+        "wallet (request_wallet_sign) and reuse that one signature as veil_signature for every Hyde call this session; 2) hyde_balance; " +
+        "3) if spendable_usdc is below the amount to send, the user must hyde_deposit first (min 20.1 USDC, from the chain where " +
+        "get_portfolio shows their USDC) and wait for it to clear (~15 min the first time); 4) hyde_send or hyde_payroll. " +
+        "Never try to pay a Vault recipient straight from the public PayBox balance: that is not private.",
       inputSchema: z.object({}).strict(),
       outputSchema: setupOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -143,7 +147,7 @@ export function createServer() {
         "Pays a Solana address in USDC privately, in one approval, with no deposit or waiting. The transfer routes through " +
         "MagicBlock's private rollup so the payment can't be linked from sender to recipient on-chain. " +
         "Set hide_timing to delay settlement by a random 1-10 minutes for stronger privacy. Fee: 0.1% in USDC, plus ~0.002 SOL account rent the first time. " +
-        "Pass the user's Solana wallet address as sender.",
+        "Pass the user's Solana wallet address as sender. Needs Solana USDC in that wallet plus ~0.005 SOL for fees; if short, tell the user instead of trying other tools.",
       inputSchema: z
         .object({
           sender: solanaAddress.describe("The user's PayBox Solana wallet address (public key)"),
@@ -179,7 +183,8 @@ export function createServer() {
       description:
         "Proposes moving public USDC into the user's private balance. From Base: one USDC transfer. From another chain: " +
         "call with step=approve, wait for that transaction to confirm, then call with step=bridge (Circle CCTP delivers to Base automatically). " +
-        "Minimum 20.1 USDC arriving on Base.",
+        "Minimum 20.1 USDC arriving on Base. This is how the private balance gets funded; hyde_send and hyde_payroll spend only from it. " +
+        "After the transfer confirms, poll hyde_balance until spendable_usdc covers the payment (first deposit: ~15 min screening).",
       inputSchema: z
         .object({
           veil_signature: veilSignature,
@@ -241,7 +246,9 @@ export function createServer() {
     {
       title: "Private balance",
       description:
-        "Shows the user's private USDC balance and deposits still clearing. Scanning the pool can take a while: if status is computing, call again in a few seconds.",
+        "Shows the user's private USDC balance (spendable_usdc) and deposits still clearing (clearing/screening). Check it before hyde_send or " +
+        "hyde_payroll. If status is computing, wait ~10 seconds and call again with the same signature; do not call other tools meanwhile. " +
+        "Also restarts any deposit that reached the inbox but was not yet moved into the pool.",
       inputSchema: z.object({ veil_signature: veilSignature }).strict(),
       outputSchema: balanceOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -251,7 +258,7 @@ export function createServer() {
       const out = balanceOutput.parse(data);
       const summary =
         out.status === "computing"
-          ? "Scanning the private pool… call hyde_balance again in ~5 seconds."
+          ? "Scanning the private pool… call hyde_balance again in ~10 seconds with the same signature."
           : `Private balance: ${out.spendable_usdc} USDC spendable` +
             (Number(out.clearing_usdc) || Number(out.screening_usdc) ? `, ${Number(out.clearing_usdc) + Number(out.screening_usdc)} USDC still clearing.` : ".");
       return { content: text(summary), structuredContent: out };
@@ -266,7 +273,8 @@ export function createServer() {
         "Pays a recipient on any supported chain, Solana included, from the private balance, without the user's wallet appearing on-chain. " +
         "For Solana, pass a Solana wallet address as `to` and an EVM fallback_address (refund on Base if the bridge reverts). " +
         "Call without confirm to get a quote and show it to the user; call again with confirm=true only after they agree. " +
-        "No PayBox signature is needed.",
+        "No PayBox signature is needed. Spends only the private balance: if hyde_balance shows less spendable_usdc than the amount, " +
+        "tell the user to hyde_deposit first rather than retrying.",
       inputSchema: z
         .object({
           veil_signature: veilSignature,
@@ -329,7 +337,8 @@ export function createServer() {
         "Pays up to 25 people at once from the private balance, each on any supported chain (Solana included). Every payee " +
         "receives exactly their amount; fees are added on top. Outsiders can't link the payments to the payer or to each other. " +
         "Call without confirm to get the total and show it to the user; call again with confirm=true only after they approve. " +
-        "If the private balance can't cover the whole run, nobody is paid. No PayBox signature is needed.",
+        "If the private balance can't cover the whole run, nobody is paid. No PayBox signature is needed. Check hyde_balance first; " +
+        "if spendable_usdc is below total_at_most_usdc, the user must hyde_deposit first.",
       inputSchema: z
         .object({
           veil_signature: veilSignature,

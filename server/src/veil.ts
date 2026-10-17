@@ -2,7 +2,6 @@ import {
   Keypair,
   deriveSubaccountChildPrivateKey,
   deriveSubaccountSlot,
-  getPrivateBalance,
   getQueueBalance,
   getRelayUrl,
   isSubaccountForwarderDeployed,
@@ -11,8 +10,9 @@ import {
   type SubaccountSlot,
 } from "@veil-cash/sdk";
 import type { Address, Hex } from "viem";
-import { formatUsdc, parseUsdc } from "./cctp.js";
+import { formatUsdc } from "./cctp.js";
 import { rpcUrl } from "./chains.js";
+import { scanBalances } from "./scan.js";
 
 /** We use one sub-account slot as every user's "go private" inbox. */
 export const INBOX_SLOT = 0;
@@ -91,19 +91,18 @@ export interface PrivateBalances {
 
 export async function balances(kp: Keypair, slot: InboxSlot): Promise<PrivateBalances> {
   const child = new Keypair(deriveSubaccountChildPrivateKey(rootKey(kp), INBOX_SLOT));
-  const [main, inbox, queue] = await Promise.all([
-    getPrivateBalance({ keypair: kp, pool: "usdc", rpcUrl: BASE_RPC() }),
-    getPrivateBalance({ keypair: child, pool: "usdc", rpcUrl: BASE_RPC() }),
+  const [[main, inbox], queue] = await Promise.all([
+    scanBalances([kp, child], BASE_RPC()),
     inboxQueue(slot).catch(() => ({ queueBalance: "0" })),
   ]);
-  return { shielded: main.privateBalance, inbox: inbox.privateBalance, screening: queue.queueBalance };
+  return { shielded: formatUsdc(main.unspent), inbox: formatUsdc(inbox.unspent), screening: queue.queueBalance };
 }
 
 /** Moves anything that cleared screening from the inbox into the main shielded balance. */
 export async function mergeInbox(kp: Keypair): Promise<string | null> {
   const child = new Keypair(deriveSubaccountChildPrivateKey(rootKey(kp), INBOX_SLOT));
-  const inbox = await getPrivateBalance({ keypair: child, pool: "usdc", rpcUrl: BASE_RPC() });
-  if (parseUsdc(inbox.privateBalance) === 0n) return null;
+  const [inbox] = await scanBalances([child], BASE_RPC());
+  if (inbox.unspent === 0n) return null;
   const r = await mergeSubaccount({ rootPrivateKey: rootKey(kp), slot: INBOX_SLOT, pool: "usdc", rpcUrl: BASE_RPC() });
   return r.transactionHash;
 }
