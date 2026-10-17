@@ -84,9 +84,18 @@ cd server && npm i && npm test
 npm run test:e2e   # bundled plugin.mjs, fresh process per call → broker proxy → API → live Base/Circle/Veil. Moves no money.
 ```
 
+## Deployments (Base mainnet)
+
+| Contract | Address |
+|---|---|
+| `ExitBoxFactory` | [`0x5f0b5c773e04bb1173d7ea8e174442f4f22d53a7`](https://basescan.org/address/0x5f0b5c773e04bb1173d7ea8e174442f4f22d53a7) |
+
+Wired to Base USDC and CCTP TokenMessengerV2; `server/scripts/verify-factory.ts <address>` checks the
+wiring and that the API's offline box prediction matches the chain.
+
 ## Deploy
 
-1. **Contracts:** `cd contracts && DEPLOYER_PRIVATE_KEY=0x… npm run deploy -- --network base` → `EXIT_BOX_FACTORY`.
+1. **Contracts** (already deployed above): `cd contracts && DEPLOYER_PRIVATE_KEY=0x… npm run deploy -- --network base` → `EXIT_BOX_FACTORY`.
 2. **Hyde API:** deploy `server/` (Dockerfile, or `render.yaml` blueprint) with `HYDE_API_KEY` (random, 16+
    chars), `RELAYER_PRIVATE_KEY` (hot wallet with ~$2–3 of ETH on Base), `EXIT_BOX_FACTORY`, optional `BASE_RPC_URL`.
 3. **PayBox developer portal:** upload `plugin/dist/plugin.mjs`, then in **Test & configure**:

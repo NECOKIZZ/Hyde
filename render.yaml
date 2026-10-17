@@ -16,7 +16,7 @@ services:
       - key: RELAYER_PRIVATE_KEY
         sync: false
       - key: EXIT_BOX_FACTORY
-        sync: false
+        value: "0x5f0b5c773e04bb1173d7ea8e174442f4f22d53a7"
       - key: RELAYER_FEE_USDC
         value: "0.03"
       - key: BASE_RPC_URL
